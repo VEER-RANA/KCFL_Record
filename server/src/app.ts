@@ -7,6 +7,8 @@ import { env } from './config/env.js';
 
 export function createApp() {
   const app = express();
+  const configuredOrigins = new Set(env.clientOrigins);
+  const isDevOnlyConfig = env.clientOrigins.length === 1 && env.clientOrigins[0] === 'http://localhost:5173';
 
   const isLocalDevOrigin = (origin: string | undefined) => {
     if (!origin) {
@@ -24,9 +26,9 @@ export function createApp() {
   // Dynamic CORS configuration to allow both localhost and IP addresses
   const corsOptions = {
     origin: function (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {
-      // If CLIENT_ORIGIN env var is set, use it strictly
-      if (env.clientOrigin && env.clientOrigin !== 'http://localhost:5173') {
-        if (origin === env.clientOrigin) {
+      // If production origins are configured, match exact origins.
+      if (!isDevOnlyConfig) {
+        if (origin && configuredOrigins.has(origin)) {
           callback(null, true);
         } else {
           callback(new Error('Not allowed by CORS'));

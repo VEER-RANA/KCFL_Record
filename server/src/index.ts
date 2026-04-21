@@ -8,7 +8,7 @@ async function main() {
   const app = createApp();
   const server = createServer(app);
 
-  initializeSocket(server, env.clientOrigin);
+  initializeSocket(server, env.clientOrigins);
 
   await connectDatabase();
 

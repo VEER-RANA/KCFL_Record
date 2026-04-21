@@ -3,7 +3,7 @@ import type { Server as HttpServer } from 'node:http';
 
 let io: Server | null = null;
 
-export function initializeSocket(server: HttpServer, corsOrigin: string) {
+export function initializeSocket(server: HttpServer, corsOrigin: string | string[]) {
   io = new Server(server, {
     cors: {
       origin: corsOrigin,
