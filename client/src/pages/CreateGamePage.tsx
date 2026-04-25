@@ -17,7 +17,7 @@ export function CreateGamePage() {
     distributionDirection: 'ascending' | 'descending';
     includeWithoutSir: boolean;
   }>({
-    name: 'Friday Match',
+    name: '(‾◡◝) ( ͡• ͜ʖ ͡• )',
     superPlayerName: 'Super Player',
     playerCount: 4,
     maxCardsPerPlayer: 8,
