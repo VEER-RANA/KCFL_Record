@@ -25,6 +25,8 @@ export function GameRoomPage() {
   const [addingRows, setAddingRows] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [showCelebration, setShowCelebration] = useState(false);
+  const [modalRound, setModalRound] = useState<number | null>(null);
+  const [modalBids, setModalBids] = useState<Record<string, number | undefined>>({});
   const currentGameCodeRef = useRef<string>('');
   const tableRef = useRef<HTMLDivElement>(null);
   const rankingRef = useRef<HTMLDivElement>(null);
@@ -171,6 +173,75 @@ export function GameRoomPage() {
     }));
   };
 
+  const openBidsModal = (round: number) => {
+    // initialize modal inputs from current bids
+    const initial: Record<string, number | undefined> = {};
+    (activeGame.players ?? []).forEach((p) => {
+      initial[p.id] = bids[round]?.[p.id]?.bid;
+    });
+    setModalBids(initial);
+    setModalRound(round);
+  };
+
+  const closeBidsModal = () => {
+    setModalRound(null);
+    setModalBids({});
+  };
+
+  const handleModalInputChange = (playerId: string, value?: number) => {
+    setModalBids((prev) => ({ ...prev, [playerId]: value }));
+  };
+
+  // Get the card number for the current round (e.g., '3 Spades ♠' => 3)
+  const getCardCountForRound = (round: number) => {
+    const dist = activeGame.distribution.find((row) => row.round === round);
+    if (dist) {
+      const match = dist.label.match(/^(\d+)/);
+      return match ? Number(match[1]) : 0;
+    }
+    return 0;
+  };
+
+  const getTotalBidCount = (roundBids: Record<string, number | undefined>) => {
+    return Object.values(roundBids).reduce((sum, bid) => {
+      if (bid === undefined || Number.isNaN(bid)) {
+        return sum;
+      }
+      return sum + bid;
+    }, 0);
+  };
+
+  const saveModalBids = () => {
+    if (modalRound === null) return;
+
+    const cardCount = getCardCountForRound(modalRound);
+    const totalBids = getTotalBidCount(modalBids);
+    if (cardCount > 0 && totalBids === cardCount) {
+      alert('Total bid is equal to total card number. Please enter a different total.');
+      return;
+    }
+
+    setBids((prev) => {
+      const next: BidEntry = { ...prev };
+      next[modalRound] = {
+        ...(next[modalRound] ?? {})
+      };
+
+      Object.entries(modalBids).forEach(([playerId, bidVal]) => {
+        next[modalRound][playerId] = {
+          bid: bidVal,
+          completed: false,
+          status: 'pending'
+        };
+      });
+
+      return next;
+    });
+
+    // close modal but do not submit to server (not final)
+    closeBidsModal();
+  };
+
   const handleMarkBid = (cardRound: number, playerId: string, isComplete: boolean) => {
     if (!activeGame.code || !isSuperPlayer) return;
 
@@ -180,6 +251,17 @@ export function GameRoomPage() {
     }
 
     const bidValue = bidEntry.bid;
+
+    const cardCount = getCardCountForRound(cardRound);
+    const currentRoundBids = Object.fromEntries(
+      playerColumns.map((player) => [player.id, bids[cardRound]?.[player.id]?.bid])
+    );
+    currentRoundBids[playerId] = bidValue;
+    const totalBids = getTotalBidCount(currentRoundBids);
+    if (cardCount > 0 && totalBids === cardCount) {
+      alert('Total bid is equal to total card number. Please enter a different total.');
+      return;
+    }
 
     setBids((prev) => ({
       ...prev,
@@ -313,6 +395,7 @@ export function GameRoomPage() {
   const renderBidContent = (cardRound: number, player: PlayerColumn) => {
     const { bidEntry, isSubmitted, scoreEarned } = getBidMeta(cardRound, player.id);
 
+
     if (isSuperPlayer) {
       if (!isSubmitted) {
         return (
@@ -327,26 +410,21 @@ export function GameRoomPage() {
                 onChange={(e) => {
                   const rawValue = e.target.value;
                   const numericValue = rawValue.replace(/\D/g, '').slice(0, 2);
-
                   if (numericValue === '') {
                     handleBidChange(cardRound, player.id, undefined);
                     return;
                   }
-
                   const nextBid = Math.min(Number(numericValue), maxTwoDigitBid);
-                  handleBidChange(
-                    cardRound,
-                    player.id,
-                    nextBid
-                  );
+                  handleBidChange(cardRound, player.id, nextBid);
                 }}
                 placeholder="0"
+                disabled={isSubmitted}
               />
             </div>
             <div className="bid-actions">
               <button
                 onClick={() => handleMarkBid(cardRound, player.id, true)}
-                disabled={bidEntry?.bid === undefined || Number.isNaN(bidEntry.bid)}
+                disabled={bidEntry?.bid === undefined || Number.isNaN(bidEntry.bid) || isSubmitted}
                 className="bid-btn success"
                 title="Mark as complete (✓)"
               >
@@ -354,7 +432,7 @@ export function GameRoomPage() {
               </button>
               <button
                 onClick={() => handleMarkBid(cardRound, player.id, false)}
-                disabled={bidEntry?.bid === undefined || Number.isNaN(bidEntry.bid)}
+                disabled={bidEntry?.bid === undefined || Number.isNaN(bidEntry.bid) || isSubmitted}
                 className="bid-btn fail"
                 title="Mark as incomplete (✗)"
               >
@@ -364,7 +442,7 @@ export function GameRoomPage() {
           </div>
         );
       }
-
+      // Already submitted: show as read-only
       return (
         <div className="bid-result">
           <span className="bid-value">{bidEntry?.bid}</span>
@@ -455,6 +533,81 @@ export function GameRoomPage() {
         </div>
       ) : null}
 
+      {modalRound !== null ? (
+        <div className="bids-modal-overlay" role="dialog" aria-modal="true">
+          <div className="bids-modal-backdrop" />
+          <div className="bids-modal-card">
+            <button
+              type="button"
+              className="bids-modal-close"
+              onClick={closeBidsModal}
+              aria-label="Close bids modal"
+            >
+              Close
+            </button>
+            <p className="eyebrow">Batch edit bids</p>
+            <h2>Round {modalRound}</h2>
+            <p className="muted">
+              {activeGame.distribution.find((d) => d.round === modalRound)?.label}
+            </p>
+
+
+            <div className="bids-modal-list">
+              {activeGame.players.map((p) => {
+                const submittedBid = bids[modalRound]?.[p.id];
+                const isSubmitted = submittedBid && (submittedBid.status === 'success' || submittedBid.status === 'fail');
+                return (
+                  <div key={p.id} className="bids-modal-row">
+                    <label className="muted">{p.name}</label>
+                    {isSubmitted ? (
+                      <span style={{ minWidth: 60, textAlign: 'center', fontWeight: 700 }}>
+                        {submittedBid?.bid ?? ''}
+                        <span style={{ marginLeft: 6, color: submittedBid?.status === 'success' ? '#16a34a' : '#b91c1c' }}>
+                          {submittedBid?.status === 'success' ? '✓' : '✗'}
+                        </span>
+                      </span>
+                    ) : (
+                      <input
+                        type="number"
+                        min={0}
+                        max={maxTwoDigitBid}
+                        value={modalBids[p.id] ?? ''}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          const numeric = raw.replace(/\D/g, '');
+                          if (numeric === '') {
+                            handleModalInputChange(p.id, undefined);
+                            return;
+                          }
+                          handleModalInputChange(p.id, Math.min(Number(numeric), maxTwoDigitBid));
+                        }}
+                        placeholder="0"
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="bids-modal-actions">
+              {(() => {
+                // Hide Save if all bids are submitted
+                const allSubmitted = activeGame.players.every((p) => {
+                  const submittedBid = bids[modalRound]?.[p.id];
+                  return submittedBid && (submittedBid.status === 'success' || submittedBid.status === 'fail');
+                });
+                return !allSubmitted ? (
+                  <button type="button" onClick={saveModalBids} className="start-game-btn">
+                    Save
+                  </button>
+                ) : null;
+              })()}
+              
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <header className="room-header panel">
         <div>
           <p className="eyebrow">Live room</p>
@@ -539,7 +692,16 @@ export function GameRoomPage() {
             <tbody>
               {activeGame.distribution.map((row) => (
                 <tr key={row.round}>
-                  <td>
+                  <td
+                    onClick={() => {
+                      if (isSuperPlayer) {
+                        openBidsModal(row.round);
+                      }
+                    }}
+                    role={isSuperPlayer ? 'button' : undefined}
+                    aria-pressed={isSuperPlayer ? false : undefined}
+                    style={isSuperPlayer ? { cursor: 'pointer' } : undefined}
+                  >
                     <strong className="card-label-full">{row.label}</strong>
                     <strong className="card-label-short" aria-label={row.label}>{getCardShortLabel(row.label)}</strong>
                   </td>
