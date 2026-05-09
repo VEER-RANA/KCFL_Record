@@ -203,7 +203,7 @@ export function GameRoomPage() {
   };
 
   const getTotalBidCount = (roundBids: Record<string, number | undefined>) => {
-    return Object.values(roundBids).reduce((sum, bid) => {
+    return Object.values(roundBids).reduce((sum: number, bid) => {
       if (bid === undefined || Number.isNaN(bid)) {
         return sum;
       }
