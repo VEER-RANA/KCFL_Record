@@ -689,6 +689,26 @@ export function GameRoomPage() {
 
         <div className="table-scroll">
           <table className={useCompactCardLabels ? 'compact-card-labels' : undefined}>
+            {isViewer ? (
+              <thead>
+                <tr>
+                  <th scope="col">Cards</th>
+                  {playerColumns.map((player) => (
+                    <th
+                      key={player.id}
+                      scope="col"
+                      className="player-column viewer-player-column"
+                      title={player.name}
+                    >
+                      <span className="player-dot" aria-hidden="true" />
+                      <span className="player-name-short" aria-label={player.name}>
+                        {getPlayerShortName(player.name)}
+                      </span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+            ) : null}
             <tbody>
               {activeGame.distribution.map((row) => (
                 <tr key={row.round}>

@@ -1201,6 +1201,22 @@ th.player-column {
   border-bottom-color: color-mix(in srgb, var(--player-color) 35%, var(--border));
 }
 
+th.viewer-player-column {
+  background: linear-gradient(180deg, #2f2018, #20150f);
+  border-bottom-color: var(--border);
+  color: #f9e6b5;
+}
+
+th.viewer-player-column .player-dot {
+  background: linear-gradient(180deg, var(--accent), #9a742e);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+
+th.viewer-player-column .player-name-short {
+  display: inline;
+  color: #f9e6b5;
+}
+
 th:first-child,
 td:first-child {
   position: sticky;
