@@ -63,7 +63,12 @@ export function CreateGamePage() {
           }
         })
       );
-
+      if (typeof window !== 'undefined') {
+        const superPlayerId = response.game.players.find((player) => player.isSuperPlayer)?.id;
+        if (superPlayerId) {
+          window.localStorage.setItem(`kcfl-player:${response.game.code}`, superPlayerId);
+        }
+      }
       navigate(`/game/${response.game.code}/add-players`);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Failed to create game');

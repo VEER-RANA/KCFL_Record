@@ -1,6 +1,6 @@
-import { createGameCode, createPlayerState, buildDistribution, appendDistribution, calculateRanking, applyBidResult } from '../services/gameEngine.js';
+import { createGameCode, createPlayerState, buildDistribution, appendDistribution, calculateRanking } from '../services/gameEngine.js';
 import { GameModel } from '../models/Game.js';
-import type { GameSettings, GameSnapshot } from '../types.js';
+import type { BidCell, GameSettings, GameSnapshot } from '../types.js';
 
 const GAME_TTL_MS = 60 * 60 * 1000;
 const PLAYER_COLOR_PALETTE = [
@@ -38,7 +38,10 @@ function toSnapshot(gameDoc: Record<string, unknown>): GameSnapshot {
     players: (gameDoc.players as GameSnapshot['players']) ?? [],
     bids: normalizeBids(gameDoc.bids),
     distribution: (gameDoc.distribution as GameSnapshot['distribution']) ?? [],
-    ranking: (gameDoc.ranking as GameSnapshot['ranking']) ?? []
+    ranking: (gameDoc.ranking as GameSnapshot['ranking']) ?? [],
+    allBidsSubmittedAt: gameDoc.allBidsSubmittedAt as number | undefined,
+    roundCompletionTimes: gameDoc.roundCompletionTimes as Record<number, number> | undefined,
+    editPoll: gameDoc.editPoll as GameSnapshot['editPoll'] | undefined
   };
 }
 
@@ -51,7 +54,10 @@ function toPersistence(game: GameSnapshot) {
     players: game.players,
     bids: game.bids,
     distribution: game.distribution,
-    ranking: game.ranking
+    ranking: game.ranking,
+    allBidsSubmittedAt: game.allBidsSubmittedAt,
+    roundCompletionTimes: game.roundCompletionTimes,
+    editPoll: game.editPoll
   };
 }
 
@@ -178,29 +184,75 @@ export async function updateBid(code: string, round: number, playerId: string, b
   }
 
   const existingBid = game.bids[round]?.[playerId];
-  if (existingBid) {
+  const canEditSubmittedBid = hasApprovedEdit(game, round);
+  if (existingBid && !canEditSubmittedBid) {
     return game;
   }
 
   const roundBids = game.bids[round] ?? {};
-  const nextBids: GameSnapshot['bids'] = {
+  const nextBidsForPlayers: GameSnapshot['bids'] = {
     ...game.bids,
     [round]: {
       ...roundBids,
       [playerId]: {
         bid,
         completed,
-        status: completed ? 'success' : 'fail'
+        status: (completed ? 'success' : 'fail') as BidCell['status']
       }
     }
   };
 
-  const nextPlayers = applyBidResult(game.players, playerId, bid, completed);
+  const nextPlayers = rebuildPlayerScores({
+    ...game,
+    bids: nextBidsForPlayers
+  });
+
+  const updatedRoundBids = nextBidsForPlayers[round];
+  const allRoundBidsSubmitted = game.players.every((player) => {
+    const bidEntry = updatedRoundBids[player.id];
+    return bidEntry && (bidEntry.status === 'success' || bidEntry.status === 'fail');
+  });
+
+  const roundCompletionTimes = { ...(game.roundCompletionTimes ?? {}) };
+  if (allRoundBidsSubmitted && !roundCompletionTimes[round]) {
+    roundCompletionTimes[round] = Date.now();
+  }
+
   const nextGame: GameSnapshot = {
     ...game,
     players: nextPlayers,
-    bids: nextBids,
-    ranking: calculateRanking(nextPlayers)
+    bids: nextBidsForPlayers,
+    ranking: calculateRanking(nextPlayers),
+    roundCompletionTimes
+  };
+
+  const savedDoc = await GameModel.findOneAndUpdate(
+    { code },
+    {
+      $set: {
+        ...toPersistence(nextGame),
+        expiresAt: getExpiryDate()
+      }
+    },
+    { new: true, lean: true }
+  );
+
+  return savedDoc ? toSnapshot(savedDoc as Record<string, unknown>) : null;
+}
+
+export async function resetEditPoll(code: string) {
+  const game = await getGame(code);
+  if (!game) {
+    return null;
+  }
+
+  if (!game.editPoll) {
+    return game;
+  }
+
+  const nextGame: GameSnapshot = {
+    ...game,
+    editPoll: undefined
   };
 
   const savedDoc = await GameModel.findOneAndUpdate(
@@ -246,4 +298,254 @@ export async function endGame(code: string) {
 export async function listGames() {
   const games = await GameModel.find().lean();
   return games.map((gameDoc) => toSnapshot(gameDoc as Record<string, unknown>));
+}
+
+function checkAllBidsSubmitted(game: GameSnapshot): boolean {
+  const players = game.players;
+  if (players.length === 0) return false;
+
+  // All players must have submitted at least one bid
+  return players.every((player) => {
+    // Check if player has any submitted bid in any round
+    return Object.values(game.bids).some((roundBids) => {
+      const bidEntry = roundBids[player.id];
+      return bidEntry && (bidEntry.status === 'success' || bidEntry.status === 'fail');
+    });
+  });
+}
+
+function checkRoundBidsSubmitted(game: GameSnapshot, round: number): boolean {
+  const players = game.players;
+  if (players.length === 0) return false;
+
+  const roundBids = game.bids[round];
+  if (!roundBids) return false;
+
+  // All players must have submitted bid for this round
+  return players.every((player) => {
+    const bidEntry = roundBids[player.id];
+    return bidEntry && (bidEntry.status === 'success' || bidEntry.status === 'fail');
+  });
+}
+
+function hasApprovedEdit(game: GameSnapshot, round: number): boolean {
+  return game.editPoll?.approvedAt !== undefined && game.editPoll.round === round;
+}
+
+function rebuildPlayerScores(game: GameSnapshot): GameSnapshot['players'] {
+  const nextPlayers = game.players.map((player) => ({
+    ...player,
+    currentBid: 0,
+    completedBid: false,
+    bidSuccess: false,
+    score: 0,
+    totalScore: 0
+  }));
+
+  const playerById = new Map(nextPlayers.map((player) => [player.id, player] as const));
+
+  Object.entries(game.bids).forEach(([, roundBids]) => {
+    Object.entries(roundBids).forEach(([playerId, bidEntry]) => {
+      const player = playerById.get(playerId);
+      if (!player) {
+        return;
+      }
+
+      const score = bidEntry.completed ? bidEntry.bid + 10 : 0;
+      player.currentBid = bidEntry.bid;
+      player.completedBid = bidEntry.completed;
+      player.bidSuccess = bidEntry.completed;
+      player.score = score;
+      player.totalScore += score;
+    });
+  });
+
+  return nextPlayers;
+}
+
+export async function initiateEditPoll(code: string, initiatedByPlayerId: string, message: string, round: number) {
+  const game = await getGame(code);
+  if (!game) {
+    return null;
+  }
+
+  // Check if all bids for this round are submitted
+  if (!checkRoundBidsSubmitted(game, round)) {
+    throw new Error('Not all players have submitted bids for this round yet');
+  }
+
+  // Check if edit poll already exists for this round
+  if (game.editPoll?.active) {
+    throw new Error('An edit poll is already active for this game');
+  }
+
+  // Ensure this round is still within the 2-minute edit visibility window
+  const roundSubmittedAt = game.roundCompletionTimes?.[round];
+  if (!roundSubmittedAt) {
+    throw new Error('Round submission time not found');
+  }
+
+  const TWO_MIN_MS = 2 * 60 * 1000;
+  if (Date.now() - roundSubmittedAt > TWO_MIN_MS) {
+    throw new Error('Edit window for this round has expired');
+  }
+
+  // Ensure initiator is the super player
+  const initiator = game.players.find((p) => p.id === initiatedByPlayerId);
+  if (!initiator || !initiator.isSuperPlayer) {
+    throw new Error('Only super player may initiate an edit poll');
+  }
+
+  const initiatedAt = Date.now();
+
+  const nextGame: GameSnapshot = {
+    ...game,
+    editPoll: {
+      active: true,
+      initiatedAt,
+      initiatedBy: initiatedByPlayerId,
+      message,
+      round,
+      votes: {}
+    }
+  };
+
+  const savedDoc = await GameModel.findOneAndUpdate(
+    { code },
+    {
+      $set: {
+        ...toPersistence(nextGame),
+        expiresAt: getExpiryDate()
+      }
+    },
+    { new: true, lean: true }
+  );
+
+  return savedDoc ? toSnapshot(savedDoc as Record<string, unknown>) : null;
+}
+
+export async function voteOnEditPoll(code: string, playerId: string, vote: boolean) {
+  const game = await getGame(code);
+  if (!game) {
+    return null;
+  }
+
+  if (!game.editPoll || !game.editPoll.active) {
+    throw new Error('No active edit poll');
+  }
+
+  // If the poll has expired on the server, close it and return
+  const POLL_WINDOW_MS = 60 * 1000;
+  if (Date.now() - (game.editPoll.initiatedAt ?? 0) > POLL_WINDOW_MS) {
+    const closedGame: GameSnapshot = {
+      ...game,
+      editPoll: {
+        ...game.editPoll,
+        active: false
+      }
+    };
+
+    const savedExpired = await GameModel.findOneAndUpdate(
+      { code },
+      {
+        $set: {
+          ...toPersistence(closedGame),
+          expiresAt: getExpiryDate()
+        }
+      },
+      { new: true, lean: true }
+    );
+
+    return savedExpired ? toSnapshot(savedExpired as Record<string, unknown>) : null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(game.editPoll.votes, playerId)) {
+    return game;
+  }
+
+  // Record the vote
+  const updatedVotes = {
+    ...game.editPoll.votes,
+    [playerId]: vote
+  };
+
+  let nextEditPoll = {
+    ...game.editPoll,
+    votes: updatedVotes
+  } as NonNullable<GameSnapshot['editPoll']>;
+
+  // If threshold met after this vote, auto-close and mark approved
+  const tentativeGame: GameSnapshot = {
+    ...game,
+    editPoll: nextEditPoll
+  };
+
+  if (hasThresholdMet(tentativeGame)) {
+    nextEditPoll = {
+      ...nextEditPoll,
+      active: false,
+      approvedAt: Date.now()
+    } as NonNullable<GameSnapshot['editPoll']>;
+  }
+
+  const nextGame: GameSnapshot = {
+    ...game,
+    editPoll: nextEditPoll
+  };
+
+  const savedDoc = await GameModel.findOneAndUpdate(
+    { code },
+    {
+      $set: {
+        ...toPersistence(nextGame),
+        expiresAt: getExpiryDate()
+      }
+    },
+    { new: true, lean: true }
+  );
+
+  return savedDoc ? toSnapshot(savedDoc as Record<string, unknown>) : null;
+}
+
+export async function closedEditPoll(code: string) {
+  const game = await getGame(code);
+  if (!game) {
+    return null;
+  }
+
+  if (!game.editPoll) {
+    return game;
+  }
+
+  const nextGame: GameSnapshot = {
+    ...game,
+    editPoll: {
+      ...game.editPoll,
+      active: false,
+      approvedAt: hasThresholdMet(game) ? Date.now() : game.editPoll.approvedAt
+    }
+  };
+
+  const savedDoc = await GameModel.findOneAndUpdate(
+    { code },
+    {
+      $set: {
+        ...toPersistence(nextGame),
+        expiresAt: getExpiryDate()
+      }
+    },
+    { new: true, lean: true }
+  );
+
+  return savedDoc ? toSnapshot(savedDoc as Record<string, unknown>) : null;
+}
+
+function hasThresholdMet(game: GameSnapshot) {
+  const playerCount = game.players.length;
+  if (playerCount === 0 || !game.editPoll) {
+    return false;
+  }
+
+  const yesVotes = Object.values(game.editPoll.votes).filter((vote) => vote === true).length;
+  return yesVotes >= Math.ceil(playerCount * 0.5);
 }

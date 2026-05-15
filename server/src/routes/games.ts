@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { createGame, getGame, addPlayerToGame, updateBid, extendGameDistribution, listGames, endGame } from '../store/gameStore.js';
+import { createGame, getGame, addPlayerToGame, updateBid, extendGameDistribution, listGames, endGame, initiateEditPoll, voteOnEditPoll, closedEditPoll, resetEditPoll } from '../store/gameStore.js';
 import { emitGameUpdate } from '../socket.js';
 
 const router = Router();
@@ -38,6 +38,17 @@ const bidSchema = z.object({
 
 const extendDistributionSchema = z.object({
   rowsToAdd: z.number().int().min(1).max(100)
+});
+
+const initiateEditPollSchema = z.object({
+  playerId: z.string().min(2),
+  message: z.string().min(1).max(500),
+  round: z.number().int().min(1)
+});
+
+const voteOnEditPollSchema = z.object({
+  playerId: z.string().min(2),
+  vote: z.boolean()
 });
 
 router.get('/', async (_request, response) => {
@@ -148,6 +159,82 @@ router.post('/:code/end-game', async (request, response) => {
   emitGameUpdate(game.code, game);
 
   response.json({ game, status: 'success' });
+});
+
+router.post('/:code/edit-poll/initiate', async (request, response) => {
+  const parsed = initiateEditPollSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ issues: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const game = await initiateEditPoll(request.params.code, parsed.data.playerId, parsed.data.message, parsed.data.round);
+    if (!game) {
+      response.status(404).json({ message: 'Game not found' });
+      return;
+    }
+
+    emitGameUpdate(game.code, game);
+    response.json({ game });
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : 'Failed to initiate edit poll';
+    response.status(400).json({ message: errorMsg });
+  }
+});
+
+router.post('/:code/edit-poll/vote', async (request, response) => {
+  const parsed = voteOnEditPollSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ issues: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const game = await voteOnEditPoll(request.params.code, parsed.data.playerId, parsed.data.vote);
+    if (!game) {
+      response.status(404).json({ message: 'Game not found' });
+      return;
+    }
+
+    emitGameUpdate(game.code, game);
+    response.json({ game });
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : 'Failed to vote on edit poll';
+    response.status(400).json({ message: errorMsg });
+  }
+});
+
+router.post('/:code/edit-poll/close', async (request, response) => {
+  try {
+    const game = await closedEditPoll(request.params.code);
+    if (!game) {
+      response.status(404).json({ message: 'Game not found' });
+      return;
+    }
+
+    emitGameUpdate(game.code, game);
+    response.json({ game });
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : 'Failed to close edit poll';
+    response.status(400).json({ message: errorMsg });
+  }
+});
+
+router.post('/:code/edit-poll/reset', async (request, response) => {
+  try {
+    const game = await resetEditPoll(request.params.code);
+    if (!game) {
+      response.status(404).json({ message: 'Game not found' });
+      return;
+    }
+
+    emitGameUpdate(game.code, game);
+    response.json({ game });
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : 'Failed to reset edit poll';
+    response.status(400).json({ message: errorMsg });
+  }
 });
 
 export default router;

@@ -56,6 +56,17 @@ const gameSchema = new Schema(
       ],
       default: []
     },
+    allBidsSubmittedAt: { type: Number, default: null },
+      roundCompletionTimes: { type: Schema.Types.Mixed, default: {} },
+    editPoll: {
+      active: { type: Boolean, default: false },
+      initiatedAt: { type: Number, default: null },
+      initiatedBy: { type: String, default: null },
+      message: { type: String, default: '' },
+      round: { type: Number, default: null },
+      approvedAt: { type: Number, default: null },
+      votes: { type: Schema.Types.Mixed, default: {} }
+    },
     // MongoDB TTL index uses this field to auto-delete old game snapshots.
     expiresAt: { type: Date, required: true, index: { expires: 0 } }
   },

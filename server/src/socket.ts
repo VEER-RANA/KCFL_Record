@@ -31,6 +31,19 @@ export function initializeSocket(server: HttpServer, corsOrigin: string | string
       }
     });
 
+    // Handle live bid updates from super player
+    socket.on('bid:live', (payload: unknown) => {
+      if (currentRoom) {
+        io?.to(currentRoom).emit('bid:live', payload);
+      }
+    });
+
+    socket.on('edit:signal', (payload: unknown) => {
+      if (currentRoom) {
+        io?.to(currentRoom).emit('edit:signal', payload);
+      }
+    });
+
     socket.on('disconnect', () => {
       if (currentRoom) {
         socket.leave(currentRoom);

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { fetchGame, submitBid, extendDistribution, endGameRequest } from '../lib/api';
+import { fetchGame, submitBid, extendDistribution, endGameRequest, initiateEditPoll, voteOnEditPoll, closeEditPoll, resetEditPoll } from '../lib/api';
 import { socket } from '../lib/socket';
 import { generateGameReportPDF } from '../lib/pdfExport';
 import type { GameSnapshot } from '../lib/types';
@@ -20,6 +20,7 @@ export function GameRoomPage() {
   const { withLoading, showRouteTransition } = useGlobalLoading();
   const [game, setGame] = useState<GameSnapshot | null>(null);
   const [bids, setBids] = useState<BidEntry>({});
+  const [liveBids, setLiveBids] = useState<Record<string, number>>({});
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [addingRows, setAddingRows] = useState(false);
@@ -27,12 +28,86 @@ export function GameRoomPage() {
   const [showCelebration, setShowCelebration] = useState(false);
   const [modalRound, setModalRound] = useState<number | null>(null);
   const [modalBids, setModalBids] = useState<Record<string, number | undefined>>({});
+  const [showEditPollModal, setShowEditPollModal] = useState(false);
+  const [editRound, setEditRound] = useState<number | null>(null);
+  const [editMessage, setEditMessage] = useState('');
+  const [editMessageError, setEditMessageError] = useState('');
+  const [pollTimeRemaining, setPollTimeRemaining] = useState<number | null>(null);
+  const [showSaveToast, setShowSaveToast] = useState(false);
+  const [savingEdits, setSavingEdits] = useState(false);
+  const [editVoterId] = useState(() => {
+    const code = params.code ?? 'unknown';
+    const storageKey = `kcfl-edit-voter:${code}`;
+
+    if (typeof window === 'undefined') {
+      return storageKey;
+    }
+
+    const existing = window.localStorage.getItem(storageKey);
+    if (existing) {
+      return existing;
+    }
+
+    const generated = window.crypto?.randomUUID?.() ?? `voter-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    window.localStorage.setItem(storageKey, generated);
+    return generated;
+  });
   const currentGameCodeRef = useRef<string>('');
+  const editApprovalHandledRef = useRef<string | null>(null);
+  const sawActivePollRef = useRef(false);
+  const saveToastTimeoutRef = useRef<number | undefined>(undefined);
+  const lastSirenKeyRef = useRef<string | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const soundEnabledRef = useRef(false);
   const tableRef = useRef<HTMLDivElement>(null);
   const rankingRef = useRef<HTMLDivElement>(null);
   // Check if this is a read-only viewer
   const isViewer = new URLSearchParams(window.location.search).get('viewer') === 'true';
   const playerColumns = useMemo(() => game?.players ?? [], [game?.players]);
+
+  const getLocalPlayerId = (code: string) => {
+    if (typeof window === 'undefined') return null;
+    return window.localStorage.getItem(`kcfl-player:${code}`);
+  };
+
+  const getEditApprovalKey = (
+    code: string,
+    round: number,
+    approvedAt: number
+  ) => `kcfl-edit-approved:${code}:${round}:${approvedAt}`;
+
+  const hasSeenEditApproval = (key: string) => {
+    if (typeof window === 'undefined') return false;
+    return window.sessionStorage.getItem(key) === 'true';
+  };
+
+  const markEditApprovalSeen = (key: string) => {
+    if (typeof window === 'undefined') return;
+    window.sessionStorage.setItem(key, 'true');
+  };
+
+  // Store audio instance
+  const sirenAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const playSiren = () => {
+    if (typeof window === 'undefined') return;
+
+    // Prevent playing if disabled
+    if (!soundEnabledRef.current) return;
+
+    // Create audio only once
+    if (!sirenAudioRef.current) {
+      sirenAudioRef.current = new Audio('/sounds/edit_siren.mp3');
+      sirenAudioRef.current.volume = 0.8;
+    }
+
+    // Restart from beginning every time
+    sirenAudioRef.current.currentTime = 0;
+
+    sirenAudioRef.current
+      .play()
+      .catch((err) => console.log('Audio play blocked:', err));
+  };
 
   const populateBidsFromGame = (gameData: GameSnapshot) => {
     setBids((previousBids) => {
@@ -63,6 +138,7 @@ export function GameRoomPage() {
     async function loadGame() {
       // Reset bids when loading a new game
       setBids({});
+      setLiveBids({});
       setError('');
 
       if (!code) {
@@ -103,6 +179,17 @@ export function GameRoomPage() {
       }
     }
 
+    // Handle live bid updates from super player
+    function handleLiveBid(payload: unknown) {
+      const data = payload as { gameCode: string; cardRound: number; playerId: string; bidValue: number };
+      if (data.gameCode === currentGameCodeRef.current) {
+        setLiveBids((prev) => ({
+          ...prev,
+          [`${data.cardRound}-${data.playerId}`]: data.bidValue
+        }));
+      }
+    }
+
     function handleSocketConnect() {
       socket.emit('game:join', code);
     }
@@ -115,13 +202,16 @@ export function GameRoomPage() {
     // Leave previous room first, then join current game room
     socket.emit('game:leave');
     socket.off('game:update', handleGameUpdate);
+    socket.off('bid:live', handleLiveBid);
     socket.off('connect', handleSocketConnect);
     socket.emit('game:join', code);
     socket.on('game:update', handleGameUpdate);
+    socket.on('bid:live', handleLiveBid);
     socket.on('connect', handleSocketConnect);
 
     return () => {
       socket.off('game:update', handleGameUpdate);
+      socket.off('bid:live', handleLiveBid);
       socket.off('connect', handleSocketConnect);
       socket.emit('game:leave');
       currentGameCodeRef.current = '';
@@ -137,7 +227,189 @@ export function GameRoomPage() {
     setShowCelebration(false);
   }, [game?.status]);
 
-  if (!game) {
+  useEffect(() => {
+    if (game?.editPoll?.active) {
+      sawActivePollRef.current = true;
+    }
+  }, [game?.editPoll?.active]);
+
+  useEffect(() => {
+    const enableSound = () => {
+      soundEnabledRef.current = true;
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        void audioContextRef.current.resume();
+      }
+    };
+
+    window.addEventListener('pointerdown', enableSound, { once: true });
+    window.addEventListener('keydown', enableSound, { once: true });
+
+    return () => {
+      window.removeEventListener('pointerdown', enableSound);
+      window.removeEventListener('keydown', enableSound);
+    };
+  }, []);
+
+  useEffect(() => {
+    function handleEditSignal(payload: unknown) {
+      const data = payload as { gameCode?: string; round?: number; at?: number };
+      if (!data?.gameCode || data.gameCode !== currentGameCodeRef.current) {
+        return;
+      }
+
+      const key = `${data.gameCode}-${data.round ?? 'unknown'}-${data.at ?? 'unknown'}`;
+      if (lastSirenKeyRef.current === key) {
+        return;
+      }
+
+      lastSirenKeyRef.current = key;
+      playSiren();
+    }
+
+    socket.off('edit:signal', handleEditSignal);
+    socket.on('edit:signal', handleEditSignal);
+
+    return () => {
+      socket.off('edit:signal', handleEditSignal);
+    };
+  }, []);
+
+  useEffect(() => {
+    const activeGameSnapshot = game;
+    const localPlayerId = activeGameSnapshot?.code ? getLocalPlayerId(activeGameSnapshot.code) : null;
+    const isSuperClient =
+      !!localPlayerId &&
+      (activeGameSnapshot?.players ?? []).some((player) => player.id === localPlayerId && player.isSuperPlayer);
+    const approvalGame = activeGameSnapshot;
+
+    if (!approvalGame?.editPoll) {
+      editApprovalHandledRef.current = null;
+      sawActivePollRef.current = false;
+      return;
+    }
+
+    if (!approvalGame.editPoll.active || !isSuperClient || isViewer) {
+      if (!approvalGame.editPoll.active && !approvalGame.editPoll.approvedAt) {
+        editApprovalHandledRef.current = null;
+        sawActivePollRef.current = false;
+      }
+      return;
+    }
+
+    if (!approvalGame || !approvalGame.editPoll) {
+      return;
+    }
+
+    const approvalGameSnapshot = approvalGame;
+    const approvalPoll = approvalGameSnapshot.editPoll;
+
+    if (!approvalPoll) {
+      return;
+    }
+
+    const approvedRound = approvalPoll.round;
+    const approvedAt = approvalPoll.approvedAt;
+
+    if (!hasThresholdMet() || !sawActivePollRef.current) {
+      return;
+    }
+
+    const approvalKey = `${approvalGameSnapshot.code}-${approvalPoll.round}`;
+    if (approvedAt) {
+      const seenKey = getEditApprovalKey(approvalGameSnapshot.code, approvalPoll.round, approvedAt);
+      if (hasSeenEditApproval(seenKey)) {
+        return;
+      }
+    }
+    if (editApprovalHandledRef.current === approvalKey) {
+      return;
+    }
+
+    editApprovalHandledRef.current = approvalKey;
+
+    async function approveAndOpenEditor() {
+      try {
+        const response = await closeEditPoll(approvalGameSnapshot.code);
+        setGame(response.game);
+        setShowEditPollModal(false);
+        setModalRound(null);
+        setEditRound(approvedRound);
+        if (approvedRound !== null) {
+          // Do not open editor if game has finished
+          if (response.game.status === 'finished') {
+            return;
+          }
+
+          if (approvedAt) {
+            const seenKey = getEditApprovalKey(approvalGameSnapshot.code, approvedRound, approvedAt);
+            markEditApprovalSeen(seenKey);
+          }
+
+          // Ensure local bids state contains the round bids so tick toggles will work
+          setBids((prev) => {
+            const next = { ...prev };
+            const serverRoundBids = response.game.bids?.[approvedRound] ?? {};
+            next[approvedRound] = {
+              ...(next[approvedRound] ?? {}),
+            };
+            Object.entries(serverRoundBids).forEach(([pid, entry]) => {
+              next[approvedRound][pid] = {
+                bid: entry.bid,
+                completed: entry.completed,
+                status: entry.status
+              } as any;
+            });
+            return next;
+          });
+
+          openBidsModal(approvedRound);
+        }
+      } catch (err) {
+        editApprovalHandledRef.current = null;
+        setError(err instanceof Error ? err.message : 'Failed to close edit poll');
+      }
+    }
+
+    void approveAndOpenEditor();
+  }, [game?.code, game?.editPoll?.active, game?.editPoll?.round, game?.editPoll?.approvedAt, isViewer]);
+
+  // When server marks poll closed and approved, open editor modal for super player
+  useEffect(() => {
+    const poll = game?.editPoll;
+    if (!poll) return;
+    const localPlayerId = game?.code ? getLocalPlayerId(game.code) : null;
+    const isSuperClient =
+      !isViewer &&
+      !!localPlayerId &&
+      (game?.players ?? []).some((player) => player.id === localPlayerId && player.isSuperPlayer);
+
+    if (!poll.active && poll.approvedAt && isSuperClient && game?.status !== 'finished') {
+      if (!sawActivePollRef.current) {
+        return;
+      }
+      const seenKey = getEditApprovalKey(game.code, poll.round, poll.approvedAt);
+      if (hasSeenEditApproval(seenKey)) {
+        return;
+      }
+      const approvalKey = `${game.code}-${poll.round}`;
+      if (editApprovalHandledRef.current === approvalKey) {
+        return;
+      }
+
+      editApprovalHandledRef.current = approvalKey;
+      markEditApprovalSeen(seenKey);
+      // Open editor modal for the approved round
+      setEditRound(poll.round);
+      setModalRound(poll.round);
+      const initial: Record<string, number | undefined> = {};
+      (game?.players ?? []).forEach((p) => {
+        initial[p.id] = bids[poll.round]?.[p.id]?.bid;
+      });
+      setModalBids(initial);
+    }
+  }, [game?.editPoll?.active, game?.editPoll?.approvedAt, game?.editPoll?.round, isViewer, game?.status, game?.players, bids]);
+
+    if (!game) {
     return (
       <section className="panel">
         <div className="panel-heading">
@@ -149,7 +421,13 @@ export function GameRoomPage() {
   }
 
   const activeGame = game;
-  const isSuperPlayer = !isViewer && activeGame.players.some((p) => p.isSuperPlayer);
+  const localPlayerId = getLocalPlayerId(activeGame.code);
+  const isSuperPlayer =
+    !isViewer &&
+    !!localPlayerId &&
+    activeGame.players.some((player) => player.id === localPlayerId && player.isSuperPlayer);
+  const editPoll = activeGame.editPoll;
+  const canEditSubmittedBids = modalRound !== null && editPoll?.approvedAt !== undefined && editPoll.round === modalRound;
   const useCompactCardLabels = playerColumns.length > 5;
   const maxTwoDigitBid = Math.min(activeGame.settings.maxCardsPerPlayer, 99);
   const celebrationRanking = activeGame.ranking;
@@ -171,6 +449,16 @@ export function GameRoomPage() {
         }
       }
     }));
+
+    // Broadcast live bid to other players
+    if (game?.code && bidValue !== undefined) {
+      socket.emit('bid:live', {
+        gameCode: game.code,
+        cardRound,
+        playerId,
+        bidValue
+      });
+    }
   };
 
   const openBidsModal = (round: number) => {
@@ -211,13 +499,58 @@ export function GameRoomPage() {
     }, 0);
   };
 
-  const saveModalBids = () => {
+  const saveModalBids = async () => {
     if (modalRound === null) return;
 
     const cardCount = getCardCountForRound(modalRound);
     const totalBids = getTotalBidCount(modalBids);
     if (cardCount > 0 && totalBids === cardCount) {
       alert('Total bid is equal to total card number. Please enter a different total.');
+      return;
+    }
+
+    if (canEditSubmittedBids && activeGame.code) {
+      try {
+        setSavingEdits(true);
+        setError('');
+        const roundBids = bids[modalRound] ?? {};
+        const originalRoundBids = activeGame.bids?.[modalRound] ?? {};
+        const changedEntries = Object.entries(roundBids).filter(([playerId, currentBid]) => {
+          const originalBid = originalRoundBids[playerId];
+          return currentBid?.bid !== undefined && !Number.isNaN(currentBid.bid) && originalBid?.completed !== currentBid.completed;
+        });
+
+        await withLoading('Editing points...', async () => {
+          for (const [playerId, currentBid] of changedEntries) {
+            const response = await submitBid(activeGame.code, {
+              round: modalRound,
+              playerId,
+              bid: currentBid!.bid as number,
+              completed: currentBid!.completed
+            });
+
+            setGame(response.game);
+            populateBidsFromGame(response.game);
+          }
+
+          await resetEditPoll(activeGame.code);
+        });
+        setShowSaveToast(true);
+        if (saveToastTimeoutRef.current) {
+          window.clearTimeout(saveToastTimeoutRef.current);
+        }
+        saveToastTimeoutRef.current = window.setTimeout(() => {
+          setShowSaveToast(false);
+          closeBidsModal();
+        }, 800);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to save edited bids');
+      } finally {
+        setSavingEdits(false);
+        if (!showSaveToast) {
+          closeBidsModal();
+        }
+      }
       return;
     }
 
@@ -240,6 +573,27 @@ export function GameRoomPage() {
 
     // close modal but do not submit to server (not final)
     closeBidsModal();
+  };
+
+  const handleEditCompletionToggle = (playerId: string, isComplete: boolean) => {
+    if (modalRound === null) return;
+
+    const existingBid = bids[modalRound]?.[playerId];
+    if (existingBid?.bid === undefined || Number.isNaN(existingBid.bid)) {
+      return;
+    }
+
+    setBids((prev) => ({
+      ...prev,
+      [modalRound]: {
+        ...(prev[modalRound] ?? {}),
+        [playerId]: {
+          bid: existingBid.bid,
+          completed: isComplete,
+          status: isComplete ? 'success' : 'fail'
+        }
+      }
+    }));
   };
 
   const handleMarkBid = (cardRound: number, playerId: string, isComplete: boolean) => {
@@ -274,6 +628,13 @@ export function GameRoomPage() {
         }
       }
     }));
+
+    // Clear live bid display once submitted
+    const liveBidKey = `${cardRound}-${playerId}`;
+    setLiveBids((prev) => {
+      const { [liveBidKey]: _, ...rest } = prev;
+      return rest;
+    });
 
     void submitBid(activeGame.code, {
       round: cardRound,
@@ -344,6 +705,110 @@ export function GameRoomPage() {
     }
   };
 
+  const checkAllBidsSubmitted = () => {
+    if (!activeGame) return false;
+    return activeGame.players.every((player) => {
+      const hasSubmittedBid = Object.values(activeGame.bids).some((roundBids) => {
+        const bidEntry = roundBids[player.id];
+        return bidEntry && (bidEntry.status === 'success' || bidEntry.status === 'fail');
+      });
+      return hasSubmittedBid;
+    });
+  };
+
+  const checkRoundBidsSubmitted = (round: number) => {
+    if (!activeGame) return false;
+    const roundBids = activeGame.bids[round];
+    if (!roundBids) return false;
+    
+    return activeGame.players.every((player) => {
+      const bidEntry = roundBids[player.id];
+      return bidEntry && (bidEntry.status === 'success' || bidEntry.status === 'fail');
+    });
+  };
+
+  const isWithin2MinuteWindow = (round: number) => {
+    const submittedAt = game?.roundCompletionTimes?.[round];
+    if (!submittedAt) return false;
+
+    const timeSinceSubmission = Date.now() - submittedAt;
+    return timeSinceSubmission <= 2 * 60 * 1000;
+  };
+
+  const getPollVoteStats = () => {
+    if (!game?.editPoll) return { yes: 0, no: 0, total: game?.players.length ?? 0 };
+    const votes = game.editPoll.votes ?? {};
+    const yesCount = Object.values(votes).filter((v) => v === true).length;
+    const noCount = Object.values(votes).filter((v) => v === false).length;
+    return { yes: yesCount, no: noCount, total: game.players.length };
+  };
+
+  const hasThresholdMet = () => {
+    const stats = getPollVoteStats();
+    if (stats.total === 0) return false;
+    return stats.yes >= Math.ceil(stats.total * 0.5);
+  };
+
+  const handleOpenEditPoll = (round: number) => {
+    setEditRound(round);
+    setEditMessage('');
+    setEditMessageError('');
+    setShowEditPollModal(true);
+
+    if (game?.code) {
+      socket.emit('edit:signal', { gameCode: game.code, round, at: Date.now() });
+    }
+  };
+
+  const closeEditPollModal = () => {
+    setShowEditPollModal(false);
+    setEditMessage('');
+    setEditMessageError('');
+  };
+
+  const handleSubmitEditPoll = async () => {
+    if (!editMessage.trim()) {
+      setEditMessageError('Please enter a message for the edit request');
+      return;
+    }
+
+    if (!activeGame.code || !isSuperPlayer || editRound === null) return;
+
+    setError('');
+    try {
+      const response = await withLoading('Initiating poll...', () =>
+        initiateEditPoll(activeGame.code, {
+          playerId: activeGame.players.find((p) => p.isSuperPlayer)?.id ?? '',
+          message: editMessage,
+          round: editRound
+        })
+      );
+      setGame(response.game);
+      closeEditPollModal();
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to initiate edit poll';
+      setError(errorMsg);
+    }
+  };
+
+
+  const handleVoteOnPoll = async (vote: boolean) => {
+    if (!activeGame.code) return;
+
+    if (!editVoterId) return;
+
+    try {
+      const response = await voteOnEditPoll(activeGame.code, {
+        playerId: editVoterId,
+        vote
+      });
+      setGame(response.game);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to vote';
+      setError(errorMsg);
+    }
+  };
+
   const handleBackToCreate = () => {
     showRouteTransition('Loading home...');
     navigate('/create', { replace: true });
@@ -378,6 +843,17 @@ export function GameRoomPage() {
     return roundNumberMatch ? `${suitSymbol}${roundNumberMatch[0]}` : suitSymbol;
   };
 
+  const getCardSuitClass = (label: string) => {
+    const normalized = label.toLowerCase();
+    if (normalized.includes('heart') || normalized.includes('diamond')) {
+      return 'suit-red';
+    }
+    if (normalized.includes('spade') || normalized.includes('club')) {
+      return 'suit-black';
+    }
+    return 'suit-black';
+  };
+
   const getBidMeta = (cardRound: number, playerId: string) => {
     const bidEntry = bids[cardRound]?.[playerId];
     const status = bidEntry?.status ?? 'pending';
@@ -394,6 +870,8 @@ export function GameRoomPage() {
 
   const renderBidContent = (cardRound: number, player: PlayerColumn) => {
     const { bidEntry, isSubmitted, scoreEarned } = getBidMeta(cardRound, player.id);
+    const liveBidKey = `${cardRound}-${player.id}`;
+    const liveBidValue = liveBids[liveBidKey];
 
 
     if (isSuperPlayer) {
@@ -458,6 +936,8 @@ export function GameRoomPage() {
             <span className="bid-value">{bidEntry.bid}</span>
             <span className="score-label">{scoreEarned === 0 ? '0 pts' : `${scoreEarned} pts`}</span>
           </>
+        ) : liveBidValue !== undefined ? (
+          <span className="bid-value live-bid">#{liveBidValue}</span>
         ) : (
           '—'
         )}
@@ -533,6 +1013,12 @@ export function GameRoomPage() {
         </div>
       ) : null}
 
+      {showSaveToast ? (
+        <div className="save-toast" role="status" aria-live="polite">
+          ✓ Saved
+        </div>
+      ) : null}
+
       {modalRound !== null ? (
         <div className="bids-modal-overlay" role="dialog" aria-modal="true">
           <div className="bids-modal-backdrop" />
@@ -559,7 +1045,36 @@ export function GameRoomPage() {
                 return (
                   <div key={p.id} className="bids-modal-row">
                     <label className="muted">{p.name}</label>
-                    {isSubmitted ? (
+                    {canEditSubmittedBids ? (
+                      <div className="bids-modal-edit-controls">
+                        <span className="bids-modal-bid-chip">
+                          <span>{submittedBid?.bid ?? ''}</span>
+                          <span
+                            className={`edit-status-indicator ${submittedBid?.completed ? 'is-complete' : 'is-incomplete'}`}
+                          >
+                            {submittedBid?.completed ? '✓' : '✗'}
+                          </span>
+                        </span>
+                        <div className="bids-modal-edit-actions">
+                          <button
+                            type="button"
+                            className={`bid-btn success ${submittedBid?.completed ? 'is-active' : ''}`}
+                            onClick={() => handleEditCompletionToggle(p.id, true)}
+                            title="Mark as complete (✓)"
+                          >
+                            ✓
+                          </button>
+                          <button
+                            type="button"
+                            className={`bid-btn fail ${submittedBid?.completed === false ? 'is-active' : ''}`}
+                            onClick={() => handleEditCompletionToggle(p.id, false)}
+                            title="Mark as incomplete (✗)"
+                          >
+                            ✗
+                          </button>
+                        </div>
+                      </div>
+                    ) : isSubmitted ? (
                       <span style={{ minWidth: 60, textAlign: 'center', fontWeight: 700 }}>
                         {submittedBid?.bid ?? ''}
                         <span style={{ marginLeft: 6, color: submittedBid?.status === 'success' ? '#16a34a' : '#b91c1c' }}>
@@ -596,14 +1111,159 @@ export function GameRoomPage() {
                   const submittedBid = bids[modalRound]?.[p.id];
                   return submittedBid && (submittedBid.status === 'success' || submittedBid.status === 'fail');
                 });
-                return !allSubmitted ? (
-                  <button type="button" onClick={saveModalBids} className="start-game-btn">
-                    Save
+                return (!allSubmitted || canEditSubmittedBids) ? (
+                  <button
+                    type="button"
+                    onClick={saveModalBids}
+                    className="start-game-btn"
+                    disabled={savingEdits}
+                  >
+                    {canEditSubmittedBids ? (savingEdits ? 'Editing points...' : 'Save Edits') : 'Save'}
                   </button>
                 ) : null;
               })()}
               
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showEditPollModal && !game?.editPoll?.active ? (
+        <div className="edit-poll-modal-overlay" role="dialog" aria-modal="true">
+          <div className="edit-poll-modal-backdrop" />
+          <div className="edit-poll-modal-card">
+            <button
+              type="button"
+              className="edit-poll-modal-close"
+              onClick={closeEditPollModal}
+              aria-label="Close edit poll modal"
+            >
+              Close
+            </button>
+            <p className="eyebrow">Request Edit Permission</p>
+            <h2>
+              Edit Round {editRound}
+              {editRound && activeGame.distribution.find((d) => d.round === editRound) && (
+                <span style={{ display: 'block', fontSize: '0.75rem', fontWeight: 400, marginTop: '4px' }}>
+                  {activeGame.distribution.find((d) => d.round === editRound)?.label}
+                </span>
+              )}
+            </h2>
+            <p className="muted">
+              Describe what you want to edit. A poll will be sent to all players. You need at least 50% approval to edit.
+            </p>
+
+            <div className="edit-poll-form">
+              <label className="muted">Edit Message</label>
+              <textarea
+                value={editMessage}
+                onChange={(e) => {
+                  setEditMessage(e.target.value);
+                  setEditMessageError('');
+                }}
+                placeholder="e.g., 'Need to correct player 1 bid for this round'"
+                maxLength={500}
+                rows={4}
+              />
+              {editMessageError && <p style={{ color: '#dc2626', fontSize: '0.875rem' }}>{editMessageError}</p>}
+              <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>
+                {editMessage.length} / 500 characters
+              </p>
+            </div>
+
+            <div className="edit-poll-actions">
+              <button
+                type="button"
+                onClick={handleSubmitEditPoll}
+                className="start-game-btn"
+              >
+                Send Poll to Players
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {game?.editPoll?.active ? (
+        <div className="edit-poll-voting-modal-overlay" role="dialog" aria-modal="true">
+          <div className="edit-poll-voting-modal-backdrop" />
+          <div className="edit-poll-voting-modal-card">
+            <p className="eyebrow">Edit Poll - Round {editPoll?.round}</p>
+            <h2>
+              Edit Round {editPoll?.round}
+              {editPoll?.round && activeGame.distribution.find((d) => d.round === editPoll.round) && (
+                <span style={{ display: 'block', fontSize: '0.75rem', fontWeight: 400, marginTop: '4px' }}>
+                  {activeGame.distribution.find((d) => d.round === editPoll.round)?.label}
+                </span>
+              )}
+            </h2>
+            <p className="muted">
+              {editPoll?.message}
+            </p>
+
+            {(() => {
+              const stats = getPollVoteStats();
+              return (
+                <div className="poll-stats">
+                  <div className="poll-stat-row">
+                    <span>Total Players:</span>
+                    <strong>{stats.total}</strong>
+                  </div>
+                  <div className="poll-stat-row">
+                    <span>Yes Votes:</span>
+                    <strong style={{ color: '#16a34a' }}>{stats.yes}</strong>
+                  </div>
+                  <div className="poll-stat-row">
+                    <span>No Votes:</span>
+                    <strong style={{ color: '#b91c1c' }}>{stats.no}</strong>
+                  </div>
+                  <div className="poll-stat-row">
+                    <span>Still Voting:</span>
+                    <strong>{stats.total - stats.yes - stats.no}</strong>
+                  </div>
+                  {pollTimeRemaining !== null && (
+                    <div className="poll-stat-row">
+                      <span>Time Remaining:</span>
+                      <strong>{pollTimeRemaining}s</strong>
+                    </div>
+                  )}
+                  {stats.yes + stats.no > 0 && (
+                    <div className="poll-requirement">
+                      {hasThresholdMet() ? (
+                        <p style={{ color: '#16a34a' }}>✓ Threshold met! Edit will be allowed.</p>
+                      ) : (
+                        <p style={{ color: '#b91c1c' }}>Need {Math.ceil(stats.total * 0.5)} votes (50%) to proceed.</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {!editPoll || !Object.prototype.hasOwnProperty.call(editPoll.votes, editVoterId) ? (
+              <div className="poll-voting-actions">
+                <button
+                  type="button"
+                  onClick={() => handleVoteOnPoll(true)}
+                  className="vote-yes-btn"
+                  style={{ backgroundColor: '#16a34a' }}
+                >
+                  ✓ Yes
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleVoteOnPoll(false)}
+                  className="vote-no-btn"
+                  style={{ backgroundColor: '#b91c1c' }}
+                >
+                  ✗ No
+                </button>
+              </div>
+            ) : (
+              <div className="poll-voted-message">
+                <p>✓ You have voted and cannot change it</p>
+              </div>
+            )}
           </div>
         </div>
       ) : null}
@@ -710,32 +1370,56 @@ export function GameRoomPage() {
               </thead>
             ) : null}
             <tbody>
-              {activeGame.distribution.map((row) => (
-                <tr key={row.round}>
-                  <td
-                    onClick={() => {
-                      if (isSuperPlayer) {
-                        openBidsModal(row.round);
-                      }
-                    }}
-                    role={isSuperPlayer ? 'button' : undefined}
-                    aria-pressed={isSuperPlayer ? false : undefined}
-                    style={isSuperPlayer ? { cursor: 'pointer' } : undefined}
-                  >
-                    <strong className="card-label-full">{row.label}</strong>
-                    <strong className="card-label-short" aria-label={row.label}>{getCardShortLabel(row.label)}</strong>
-                  </td>
-                  {playerColumns.map((player) => {
-                    const { status } = getBidMeta(row.round, player.id);
+              {activeGame.distribution.map((row) => {
+                const roundBidsComplete = checkRoundBidsSubmitted(row.round);
+                const showEditButton = isSuperPlayer && roundBidsComplete && isWithin2MinuteWindow(row.round) && !game?.editPoll?.active;
+                
+                return (
+                  <tr key={row.round}>
+                    <td
+                      onClick={() => {
+                        if (isSuperPlayer) {
+                          openBidsModal(row.round);
+                        }
+                      }}
+                      role={isSuperPlayer ? 'button' : undefined}
+                      aria-pressed={isSuperPlayer ? false : undefined}
+                      style={isSuperPlayer ? { cursor: 'pointer' } : undefined}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                        <div>
+                          <strong className={`card-label-full ${getCardSuitClass(row.label)}`}>{row.label}</strong>
+                          <strong className={`card-label-short ${getCardSuitClass(row.label)}`} aria-label={row.label}>
+                            {getCardShortLabel(row.label)}
+                          </strong>
+                        </div>
+                        {showEditButton && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenEditPoll(row.round);
+                            }}
+                            className="row-edit-btn"
+                            title="Edit this round's bids"
+                          >
+                            ✏️
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                    {playerColumns.map((player) => {
+                      const { status } = getBidMeta(row.round, player.id);
 
-                    return (
-                      <td key={player.id} className={`bid-cell player-column ${status}`} style={{ '--player-color': player.color } as React.CSSProperties}>
-                        {renderBidContent(row.round, player)}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
+                      return (
+                        <td key={player.id} className={`bid-cell player-column ${status}`} style={{ '--player-color': player.color } as React.CSSProperties}>
+                          {renderBidContent(row.round, player)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
