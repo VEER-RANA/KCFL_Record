@@ -809,6 +809,19 @@ export function GameRoomPage() {
     }
   };
 
+  const handleManualClosePoll = async () => {
+    if (!activeGame.code || !isSuperPlayer) return;
+
+    setError('');
+    try {
+      const response = await closeEditPoll(activeGame.code);
+      setGame(response.game);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to close poll';
+      setError(errorMsg);
+    }
+  };
+
   const handleBackToCreate = () => {
     showRouteTransition('Loading home...');
     navigate('/create', { replace: true });
@@ -1188,6 +1201,17 @@ export function GameRoomPage() {
         <div className="edit-poll-voting-modal-overlay" role="dialog" aria-modal="true">
           <div className="edit-poll-voting-modal-backdrop" />
           <div className="edit-poll-voting-modal-card">
+            {isSuperPlayer && (
+              <button
+                type="button"
+                className="edit-poll-modal-close"
+                onClick={handleManualClosePoll}
+                aria-label="Close edit poll"
+                title="Close poll (super player only)"
+              >
+                ✕
+              </button>
+            )}
             <p className="eyebrow">Edit Poll - Round {editPoll?.round}</p>
             <h2>
               Edit Round {editPoll?.round}

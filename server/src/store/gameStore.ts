@@ -474,7 +474,13 @@ export async function voteOnEditPoll(code: string, playerId: string, vote: boole
     votes: updatedVotes
   } as NonNullable<GameSnapshot['editPoll']>;
 
-  // If threshold met after this vote, auto-close and mark approved
+  const totalVotesRequired = game.players.length;
+  const totalVotesCast = Object.keys(updatedVotes).length;
+  const yesVotes = Object.values(updatedVotes).filter((currentVote) => currentVote === true).length;
+  const remainingVotes = Math.max(totalVotesRequired - totalVotesCast, 0);
+  const canStillReachThreshold = yesVotes + remainingVotes >= Math.ceil(totalVotesRequired * 0.5);
+
+  // Close the poll when it is approved or when every player has voted.
   const tentativeGame: GameSnapshot = {
     ...game,
     editPoll: nextEditPoll
@@ -485,6 +491,22 @@ export async function voteOnEditPoll(code: string, playerId: string, vote: boole
       ...nextEditPoll,
       active: false,
       approvedAt: Date.now()
+    } as NonNullable<GameSnapshot['editPoll']>;
+  } else if (!canStillReachThreshold) {
+    nextEditPoll = {
+      ...nextEditPoll,
+      active: false
+    } as NonNullable<GameSnapshot['editPoll']>;
+  } else if (totalVotesCast >= totalVotesRequired) {
+    nextEditPoll = {
+      ...nextEditPoll,
+      active: false
+    } as NonNullable<GameSnapshot['editPoll']>;
+  } else {
+    // Explicitly ensure poll remains active when threshold is not met
+    nextEditPoll = {
+      ...nextEditPoll,
+      active: true
     } as NonNullable<GameSnapshot['editPoll']>;
   }
 
