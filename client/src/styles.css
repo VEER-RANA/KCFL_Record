@@ -16,6 +16,32 @@
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--accent) 82%, #ffffff 18%) rgba(31, 20, 15, 0.12);
+}
+
+*::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+*::-webkit-scrollbar-track {
+  background: linear-gradient(180deg, rgba(245, 236, 217, 0.58), rgba(36, 22, 15, 0.14));
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  border: 2px solid rgba(245, 236, 217, 0.86);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 84%, #fff 16%), color-mix(in srgb, var(--accent-2) 52%, var(--accent) 48%));
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 70%, #fff 30%), color-mix(in srgb, var(--accent-2) 66%, var(--accent) 34%));
+}
+
+*::-webkit-scrollbar-corner {
+  background: rgba(245, 236, 217, 0.5);
 }
 
 body {
@@ -1033,6 +1059,15 @@ input[type='color'] {
   font-weight: 700;
 }
 
+.table-scroll-shell {
+  width: 100%;
+  max-width: 100%;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(246, 235, 206, 0.9), rgba(243, 228, 193, 0.82));
+  overflow: hidden;
+}
+
 .table-scroll {
   width: 100%;
   max-width: 100%;
@@ -1040,9 +1075,8 @@ input[type='color'] {
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
-  border-radius: 14px;
-  border: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(246, 235, 206, 0.9), rgba(243, 228, 193, 0.82));
+  background: transparent;
+  scrollbar-gutter: stable both-edges;
 }
 
 .table-panel {
@@ -1817,11 +1851,19 @@ th {
     max-width: 100%;
     overflow-x: auto;
     overflow-y: hidden;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    scrollbar-gutter: stable both-edges;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+
+  .table-scroll-shell {
     border-radius: 16px;
     border: 1px solid var(--border);
     background: linear-gradient(180deg, rgba(246, 235, 206, 0.95), rgba(243, 228, 193, 0.88));
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-x: contain;
+    overflow: hidden;
   }
 
   .table-panel {
@@ -2066,6 +2108,7 @@ th {
   background: linear-gradient(160deg, rgba(247, 239, 221, 0.98), rgba(239, 226, 194, 0.96));
   box-shadow: var(--shadow);
   backdrop-filter: blur(10px);
+  scrollbar-gutter: stable;
 }
 
 .bids-modal-close {
@@ -2257,6 +2300,7 @@ th {
   border-radius: 12px;
   background: linear-gradient(180deg, #ffffff, #fbfaf7);
   box-shadow: 0 30px 80px rgba(3, 7, 18, 0.5);
+  scrollbar-gutter: stable;
 }
 
 .edit-poll-modal-close {
@@ -2334,6 +2378,7 @@ th {
   border-radius: 12px;
   background: linear-gradient(180deg, #ffffff, #fbfaf7);
   box-shadow: 0 30px 80px rgba(3, 7, 18, 0.5);
+  scrollbar-gutter: stable;
 }
 
 .poll-stats {
@@ -2437,5 +2482,187 @@ th {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+/* Score Graph Modal */
+.score-graph-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  isolation: isolate;
+}
+
+.score-graph-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(7, 11, 19, 0.6);
+  backdrop-filter: blur(6px);
+  cursor: pointer;
+}
+
+.score-graph-modal {
+  position: relative;
+  z-index: 1;
+  width: min(900px, 96%);
+  max-height: 90vh;
+  overflow: auto;
+  padding: 28px;
+  border-radius: 22px;
+  border: 1px solid var(--border);
+  background: linear-gradient(160deg, rgba(247, 239, 221, 0.98), rgba(239, 226, 194, 0.96));
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
+  scrollbar-gutter: stable;
+}
+
+.score-graph-modal h3 {
+  margin: 0 0 20px;
+  font-size: 1.5rem;
+  color: var(--text);
+  word-wrap: break-word;
+}
+
+.score-graph-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  border: 0;
+  background: rgba(15, 23, 42, 0.06);
+  cursor: pointer;
+  font-size: 1.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.score-graph-close:hover {
+  background: rgba(15, 23, 42, 0.12);
+}
+
+.score-graph-container {
+  width: 100%;
+  margin-top: 20px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Floating Score Graph Button */
+.floating-graph-btn {
+  position: fixed;
+  bottom: 32px;
+  right: 32px;
+  z-index: 50;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 0;
+  background: linear-gradient(135deg, var(--accent), #d4a574);
+  color: white;
+  font-size: 1.4rem;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(184, 138, 52, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 200ms ease, box-shadow 200ms ease;
+}
+
+.floating-graph-btn:hover {
+  transform: scale(1.1);
+  box-shadow: 0 12px 32px rgba(184, 138, 52, 0.5);
+}
+
+.floating-graph-btn:active {
+  transform: scale(0.95);
+}
+
+/* Responsive Design for Graph */
+@media (max-width: 768px) {
+  .score-graph-overlay {
+    padding: 12px;
+  }
+
+  .score-graph-modal {
+    width: min(calc(100vw - 24px), 100%);
+    max-height: 85vh;
+    padding: 20px;
+    border-radius: 16px;
+  }
+
+  .score-graph-modal h3 {
+    font-size: 1.25rem;
+    margin: 0 0 16px;
+  }
+
+  .score-graph-close {
+    width: 28px;
+    height: 28px;
+    font-size: 1rem;
+    top: 10px;
+    right: 10px;
+  }
+
+  .score-graph-container {
+    margin-top: 16px;
+  }
+
+  .floating-graph-btn {
+    width: 48px;
+    height: 48px;
+    font-size: 1.2rem;
+    bottom: 24px;
+    right: 24px;
+  }
+}
+
+@media (max-width: 480px) {
+  .score-graph-overlay {
+    padding: 8px;
+  }
+
+  .score-graph-modal {
+    width: calc(100vw - 16px);
+    max-height: 80vh;
+    padding: 16px;
+    border-radius: 12px;
+  }
+
+  .score-graph-modal h3 {
+    font-size: 1.1rem;
+    margin: 0 0 12px;
+  }
+
+  .score-graph-close {
+    width: 24px;
+    height: 24px;
+    font-size: 0.9rem;
+    top: 8px;
+    right: 8px;
+  }
+
+  .score-graph-container {
+    margin-top: 12px;
+  }
+
+  .floating-graph-btn {
+    width: 44px;
+    height: 44px;
+    font-size: 1rem;
+    bottom: 16px;
+    right: 16px;
+  }
+
+  .floating-graph-btn:hover {
+    transform: scale(1.08);
   }
 }

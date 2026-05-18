@@ -5,6 +5,7 @@ import { socket } from '../lib/socket';
 import { generateGameReportPDF } from '../lib/pdfExport';
 import type { GameSnapshot } from '../lib/types';
 import { useGlobalLoading } from '../lib/loading';
+import { ScoreGraph } from '../components/ScoreGraph';
 
 interface BidEntry {
   [cardRound: number]: {
@@ -25,6 +26,7 @@ export function GameRoomPage() {
   const [submitting, setSubmitting] = useState(false);
   const [addingRows, setAddingRows] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [showScoreGraph, setShowScoreGraph] = useState(false);
   const [showCelebration, setShowCelebration] = useState(false);
   const [modalRound, setModalRound] = useState<number | null>(null);
   const [modalBids, setModalBids] = useState<Record<string, number | undefined>>({});
@@ -853,7 +855,7 @@ export function GameRoomPage() {
               : 'C';
 
     const roundNumberMatch = label.match(/\d+/);
-    return roundNumberMatch ? `${suitSymbol}${roundNumberMatch[0]}` : suitSymbol;
+    return roundNumberMatch ? `${suitSymbol} ${roundNumberMatch[0]}` : suitSymbol;
   };
 
   const getCardSuitClass = (label: string) => {
@@ -1371,8 +1373,9 @@ export function GameRoomPage() {
           </ul>
         </details>
 
-        <div className="table-scroll">
-          <table className={useCompactCardLabels ? 'compact-card-labels' : undefined}>
+        <div className="table-scroll-shell">
+          <div className="table-scroll">
+            <table className={useCompactCardLabels ? 'compact-card-labels' : undefined}>
             {isViewer ? (
               <thead>
                 <tr>
@@ -1445,7 +1448,8 @@ export function GameRoomPage() {
                 );
               })}
             </tbody>
-          </table>
+            </table>
+          </div>
         </div>
 
         {isSuperPlayer ? (
@@ -1463,6 +1467,22 @@ export function GameRoomPage() {
           </div>
         ) : null}
       </section>
+
+      {showScoreGraph && game ? (
+        <ScoreGraph game={game} onClose={() => setShowScoreGraph(false)} />
+      ) : null}
+
+      {game ? (
+        <button
+          type="button"
+          className="floating-graph-btn"
+          onClick={() => setShowScoreGraph(true)}
+          title="View player performance graph"
+          aria-label="Show player score graph"
+        >
+          📊
+        </button>
+      ) : null}
     </section>
   );
 }
