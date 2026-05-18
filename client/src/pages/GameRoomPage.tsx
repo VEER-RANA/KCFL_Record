@@ -855,7 +855,7 @@ export function GameRoomPage() {
               : 'C';
 
     const roundNumberMatch = label.match(/\d+/);
-    return roundNumberMatch ? `${suitSymbol} ${roundNumberMatch[0]}` : suitSymbol;
+    return roundNumberMatch ? `${suitSymbol}${roundNumberMatch[0]}` : suitSymbol;
   };
 
   const getCardSuitClass = (label: string) => {
