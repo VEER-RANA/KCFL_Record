@@ -480,6 +480,16 @@ export function GameRoomPage() {
 
   const handleModalInputChange = (playerId: string, value?: number) => {
     setModalBids((prev) => ({ ...prev, [playerId]: value }));
+
+    // Keep realtime showcase in sync when bids are entered from the popup modal.
+    if (game?.code && modalRound !== null && value !== undefined) {
+      socket.emit('bid:live', {
+        gameCode: game.code,
+        cardRound: modalRound,
+        playerId,
+        bidValue: value
+      });
+    }
   };
 
   // Get the card number for the current round (e.g., '3 Spades ♠' => 3)
