@@ -1002,7 +1002,7 @@ export function GameRoomPage() {
                       aria-pressed={isSuperPlayer ? false : undefined}
                       style={isSuperPlayer ? { cursor: 'pointer' } : undefined}
                     >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}>
                         <div>
                           <strong className={`card-label-full ${getCardSuitClass(row.label)}`}>{row.label}</strong>
                           <strong className={`card-label-short ${getCardSuitClass(row.label)}`} aria-label={row.label}>
