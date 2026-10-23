@@ -65,6 +65,13 @@ export function addPlayerToGame(code: string, payload: { playerName: string; col
   });
 }
 
+export function renamePlayer(code: string, payload: { playerId: string; newName: string }) {
+  return request<{ game: GameSnapshot }>(`/games/${code}/rename-player`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload)
+  });
+}
+
 export function joinGame(code: string, payload: { playerName: string; color: string }) {
   return request<{ game: GameSnapshot }>(`/games/${code}/join`, {
     method: 'POST',
@@ -92,32 +99,6 @@ export function extendDistribution(code: string, payload: { rowsToAdd: number })
 
 export function endGameRequest(code: string) {
   return request<{ game: GameSnapshot }>(`/games/${code}/end-game`, {
-    method: 'POST'
-  });
-}
-
-export function initiateEditPoll(code: string, payload: { playerId: string; message: string; round: number }) {
-  return request<{ game: GameSnapshot }>(`/games/${code}/edit-poll/initiate`, {
-    method: 'POST',
-    body: JSON.stringify(payload)
-  });
-}
-
-export function voteOnEditPoll(code: string, payload: { playerId: string; vote: boolean }) {
-  return request<{ game: GameSnapshot }>(`/games/${code}/edit-poll/vote`, {
-    method: 'POST',
-    body: JSON.stringify(payload)
-  });
-}
-
-export function closeEditPoll(code: string) {
-  return request<{ game: GameSnapshot }>(`/games/${code}/edit-poll/close`, {
-    method: 'POST'
-  });
-}
-
-export function resetEditPoll(code: string) {
-  return request<{ game: GameSnapshot }>(`/games/${code}/edit-poll/reset`, {
     method: 'POST'
   });
 }

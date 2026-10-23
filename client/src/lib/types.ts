@@ -37,16 +37,6 @@ export interface BidCell {
   status: 'success' | 'fail';
 }
 
-export interface EditPoll {
-  active: boolean;
-  initiatedAt: number;
-  initiatedBy: string;
-  message: string;
-  round: number;
-  approvedAt?: number;
-  votes: Record<string, boolean>;
-}
-
 export interface GameSnapshot {
   id: string;
   code: string;
@@ -63,5 +53,4 @@ export interface GameSnapshot {
   }>;
   allBidsSubmittedAt?: number;
     roundCompletionTimes?: Record<number, number>;
-  editPoll?: EditPoll;
 }

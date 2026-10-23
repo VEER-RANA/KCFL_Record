@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { fetchGame, addPlayerToGame } from '../lib/api';
+import { fetchGame, addPlayerToGame, renamePlayer } from '../lib/api';
 import type { GameSnapshot } from '../lib/types';
 import { useGlobalLoading } from '../lib/loading';
 
@@ -14,6 +14,8 @@ export function AddPlayersPage() {
   const [chooseColorManually, setChooseColorManually] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [editingPlayerId, setEditingPlayerId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState('');
 
   useEffect(() => {
     const code = params.code ?? '';
@@ -62,6 +64,29 @@ export function AddPlayersPage() {
     }
   };
 
+  const startEditing = (playerId: string, currentName: string) => {
+    setEditingPlayerId(playerId);
+    setEditingName(currentName);
+  };
+
+  const savePlayerName = async (playerId: string) => {
+    if (!game || !editingName.trim() || editingName.trim() === game.players.find(p => p.id === playerId)?.name) {
+      setEditingPlayerId(null);
+      return;
+    }
+
+    try {
+      const response = await withLoading('Renaming player...', () =>
+        renamePlayer(game.code, { playerId, newName: editingName.trim() })
+      );
+      setGame(response.game);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to rename player');
+    } finally {
+      setEditingPlayerId(null);
+    }
+  };
+
   if (!game) {
     return (
       <section className="panel">
@@ -71,6 +96,10 @@ export function AddPlayersPage() {
   }
 
   const isFull = game.players.length >= game.settings.playerCount;
+  // The local super player is the one who created the game
+  const superPlayerId = game.players.find((p) => p.isSuperPlayer)?.id;
+  const localPlayerId = typeof window !== 'undefined' ? window.localStorage.getItem(`kcfl-player:${game.code}`) : null;
+  const isLocalSuperPlayer = !!localPlayerId && localPlayerId === superPlayerId;
 
   return (
     <section className="panel">
@@ -92,11 +121,36 @@ export function AddPlayersPage() {
         <div className="stack-gap">
           <h3>Current players</h3>
           <ol className="ranking-list">
-            {game.players.map((player, index) => (
+            {game.players.map((player) => (
               <li key={player.id}>
                 <span className="player-dot" style={{ backgroundColor: player.color }} />
-                <strong>{player.name}</strong>
+                {isLocalSuperPlayer && player.id === localPlayerId && editingPlayerId === player.id ? (
+                  <input
+                    className="player-inline-edit"
+                    value={editingName}
+                    autoFocus
+                    onChange={(e) => setEditingName(e.target.value)}
+                    onBlur={() => void savePlayerName(player.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void savePlayerName(player.id);
+                      if (e.key === 'Escape') setEditingPlayerId(null);
+                    }}
+                  />
+                ) : (
+                  <strong>{player.name}</strong>
+                )}
                 {player.isSuperPlayer && <em className="super-tag">Super Player</em>}
+                {isLocalSuperPlayer && player.id === localPlayerId && editingPlayerId !== player.id && (
+                  <button
+                    type="button"
+                    className="player-rename-btn"
+                    onClick={() => startEditing(player.id, player.name)}
+                    title="Rename player"
+                    aria-label={`Rename ${player.name}`}
+                  >
+                    ✏️
+                  </button>
+                )}
               </li>
             ))}
           </ol>
