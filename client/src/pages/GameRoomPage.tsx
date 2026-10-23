@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { fetchGame, submitBid, extendDistribution, endGameRequest, initiateEditPoll, voteOnEditPoll, closeEditPoll, resetEditPoll } from '../lib/api';
+import { fetchGame, submitBid, extendDistribution, endGameRequest } from '../lib/api';
 import { socket } from '../lib/socket';
 import { generateGameReportPDF } from '../lib/pdfExport';
 import type { GameSnapshot } from '../lib/types';
@@ -30,35 +30,11 @@ export function GameRoomPage() {
   const [showCelebration, setShowCelebration] = useState(false);
   const [modalRound, setModalRound] = useState<number | null>(null);
   const [modalBids, setModalBids] = useState<Record<string, number | undefined>>({});
-  const [showEditPollModal, setShowEditPollModal] = useState(false);
   const [editRound, setEditRound] = useState<number | null>(null);
-  const [editMessage, setEditMessage] = useState('');
-  const [editMessageError, setEditMessageError] = useState('');
-  const [pollTimeRemaining, setPollTimeRemaining] = useState<number | null>(null);
   const [showSaveToast, setShowSaveToast] = useState(false);
   const [savingEdits, setSavingEdits] = useState(false);
-  const [editVoterId] = useState(() => {
-    const code = params.code ?? 'unknown';
-    const storageKey = `kcfl-edit-voter:${code}`;
-
-    if (typeof window === 'undefined') {
-      return storageKey;
-    }
-
-    const existing = window.localStorage.getItem(storageKey);
-    if (existing) {
-      return existing;
-    }
-
-    const generated = window.crypto?.randomUUID?.() ?? `voter-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    window.localStorage.setItem(storageKey, generated);
-    return generated;
-  });
   const currentGameCodeRef = useRef<string>('');
-  const editApprovalHandledRef = useRef<string | null>(null);
-  const sawActivePollRef = useRef(false);
   const saveToastTimeoutRef = useRef<number | undefined>(undefined);
-  const lastSirenKeyRef = useRef<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const soundEnabledRef = useRef(false);
   const tableRef = useRef<HTMLDivElement>(null);
@@ -70,22 +46,6 @@ export function GameRoomPage() {
   const getLocalPlayerId = (code: string) => {
     if (typeof window === 'undefined') return null;
     return window.localStorage.getItem(`kcfl-player:${code}`);
-  };
-
-  const getEditApprovalKey = (
-    code: string,
-    round: number,
-    approvedAt: number
-  ) => `kcfl-edit-approved:${code}:${round}:${approvedAt}`;
-
-  const hasSeenEditApproval = (key: string) => {
-    if (typeof window === 'undefined') return false;
-    return window.sessionStorage.getItem(key) === 'true';
-  };
-
-  const markEditApprovalSeen = (key: string) => {
-    if (typeof window === 'undefined') return;
-    window.sessionStorage.setItem(key, 'true');
   };
 
   // Store audio instance
@@ -196,20 +156,21 @@ export function GameRoomPage() {
       socket.emit('game:join', code);
     }
 
-    // Ensure socket is connected
-    if (!socket.connected) {
-      socket.connect();
-    }
-
-    // Leave previous room first, then join current game room
+    // Leave the previous room and register listeners before connecting. Joining
+    // after connect prevents live bids from being emitted before room setup.
     socket.emit('game:leave');
     socket.off('game:update', handleGameUpdate);
     socket.off('bid:live', handleLiveBid);
     socket.off('connect', handleSocketConnect);
-    socket.emit('game:join', code);
     socket.on('game:update', handleGameUpdate);
     socket.on('bid:live', handleLiveBid);
     socket.on('connect', handleSocketConnect);
+
+    if (socket.connected) {
+      socket.emit('game:join', code);
+    } else {
+      socket.connect();
+    }
 
     return () => {
       socket.off('game:update', handleGameUpdate);
@@ -230,12 +191,6 @@ export function GameRoomPage() {
   }, [game?.status]);
 
   useEffect(() => {
-    if (game?.editPoll?.active) {
-      sawActivePollRef.current = true;
-    }
-  }, [game?.editPoll?.active]);
-
-  useEffect(() => {
     const enableSound = () => {
       soundEnabledRef.current = true;
       if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
@@ -251,165 +206,6 @@ export function GameRoomPage() {
       window.removeEventListener('keydown', enableSound);
     };
   }, []);
-
-  useEffect(() => {
-    function handleEditSignal(payload: unknown) {
-      const data = payload as { gameCode?: string; round?: number; at?: number };
-      if (!data?.gameCode || data.gameCode !== currentGameCodeRef.current) {
-        return;
-      }
-
-      const key = `${data.gameCode}-${data.round ?? 'unknown'}-${data.at ?? 'unknown'}`;
-      if (lastSirenKeyRef.current === key) {
-        return;
-      }
-
-      lastSirenKeyRef.current = key;
-      playSiren();
-    }
-
-    socket.off('edit:signal', handleEditSignal);
-    socket.on('edit:signal', handleEditSignal);
-
-    return () => {
-      socket.off('edit:signal', handleEditSignal);
-    };
-  }, []);
-
-  useEffect(() => {
-    const activeGameSnapshot = game;
-    const localPlayerId = activeGameSnapshot?.code ? getLocalPlayerId(activeGameSnapshot.code) : null;
-    const isSuperClient =
-      !!localPlayerId &&
-      (activeGameSnapshot?.players ?? []).some((player) => player.id === localPlayerId && player.isSuperPlayer);
-    const approvalGame = activeGameSnapshot;
-
-    if (!approvalGame?.editPoll) {
-      editApprovalHandledRef.current = null;
-      sawActivePollRef.current = false;
-      return;
-    }
-
-    if (!approvalGame.editPoll.active || !isSuperClient || isViewer) {
-      if (!approvalGame.editPoll.active && !approvalGame.editPoll.approvedAt) {
-        editApprovalHandledRef.current = null;
-        sawActivePollRef.current = false;
-      }
-      return;
-    }
-
-    if (!approvalGame || !approvalGame.editPoll) {
-      return;
-    }
-
-    const approvalGameSnapshot = approvalGame;
-    const approvalPoll = approvalGameSnapshot.editPoll;
-
-    if (!approvalPoll) {
-      return;
-    }
-
-    const approvedRound = approvalPoll.round;
-    const approvedAt = approvalPoll.approvedAt;
-
-    if (!hasThresholdMet() || !sawActivePollRef.current) {
-      return;
-    }
-
-    const approvalKey = `${approvalGameSnapshot.code}-${approvalPoll.round}`;
-    if (approvedAt) {
-      const seenKey = getEditApprovalKey(approvalGameSnapshot.code, approvalPoll.round, approvedAt);
-      if (hasSeenEditApproval(seenKey)) {
-        return;
-      }
-    }
-    if (editApprovalHandledRef.current === approvalKey) {
-      return;
-    }
-
-    editApprovalHandledRef.current = approvalKey;
-
-    async function approveAndOpenEditor() {
-      try {
-        const response = await closeEditPoll(approvalGameSnapshot.code);
-        setGame(response.game);
-        setShowEditPollModal(false);
-        setModalRound(null);
-        setEditRound(approvedRound);
-        if (approvedRound !== null) {
-          // Do not open editor if game has finished
-          if (response.game.status === 'finished') {
-            return;
-          }
-
-          if (approvedAt) {
-            const seenKey = getEditApprovalKey(approvalGameSnapshot.code, approvedRound, approvedAt);
-            markEditApprovalSeen(seenKey);
-          }
-
-          // Ensure local bids state contains the round bids so tick toggles will work
-          setBids((prev) => {
-            const next = { ...prev };
-            const serverRoundBids = response.game.bids?.[approvedRound] ?? {};
-            next[approvedRound] = {
-              ...(next[approvedRound] ?? {}),
-            };
-            Object.entries(serverRoundBids).forEach(([pid, entry]) => {
-              next[approvedRound][pid] = {
-                bid: entry.bid,
-                completed: entry.completed,
-                status: entry.status
-              } as any;
-            });
-            return next;
-          });
-
-          openBidsModal(approvedRound);
-        }
-      } catch (err) {
-        editApprovalHandledRef.current = null;
-        setError(err instanceof Error ? err.message : 'Failed to close edit poll');
-      }
-    }
-
-    void approveAndOpenEditor();
-  }, [game?.code, game?.editPoll?.active, game?.editPoll?.round, game?.editPoll?.approvedAt, isViewer]);
-
-  // When server marks poll closed and approved, open editor modal for super player
-  useEffect(() => {
-    const poll = game?.editPoll;
-    if (!poll) return;
-    const localPlayerId = game?.code ? getLocalPlayerId(game.code) : null;
-    const isSuperClient =
-      !isViewer &&
-      !!localPlayerId &&
-      (game?.players ?? []).some((player) => player.id === localPlayerId && player.isSuperPlayer);
-
-    if (!poll.active && poll.approvedAt && isSuperClient && game?.status !== 'finished') {
-      if (!sawActivePollRef.current) {
-        return;
-      }
-      const seenKey = getEditApprovalKey(game.code, poll.round, poll.approvedAt);
-      if (hasSeenEditApproval(seenKey)) {
-        return;
-      }
-      const approvalKey = `${game.code}-${poll.round}`;
-      if (editApprovalHandledRef.current === approvalKey) {
-        return;
-      }
-
-      editApprovalHandledRef.current = approvalKey;
-      markEditApprovalSeen(seenKey);
-      // Open editor modal for the approved round
-      setEditRound(poll.round);
-      setModalRound(poll.round);
-      const initial: Record<string, number | undefined> = {};
-      (game?.players ?? []).forEach((p) => {
-        initial[p.id] = bids[poll.round]?.[p.id]?.bid;
-      });
-      setModalBids(initial);
-    }
-  }, [game?.editPoll?.active, game?.editPoll?.approvedAt, game?.editPoll?.round, isViewer, game?.status, game?.players, bids]);
 
     if (!game) {
     return (
@@ -428,8 +224,7 @@ export function GameRoomPage() {
     !isViewer &&
     !!localPlayerId &&
     activeGame.players.some((player) => player.id === localPlayerId && player.isSuperPlayer);
-  const editPoll = activeGame.editPoll;
-  const canEditSubmittedBids = modalRound !== null && editPoll?.approvedAt !== undefined && editPoll.round === modalRound;
+  const canEditSubmittedBids = modalRound !== null && editRound === modalRound;
   const useCompactCardLabels = playerColumns.length > 5;
   const maxTwoDigitBid = Math.min(activeGame.settings.maxCardsPerPlayer, 99);
   const celebrationRanking = activeGame.ranking;
@@ -453,9 +248,9 @@ export function GameRoomPage() {
     }));
 
     // Broadcast live bid to other players
-    if (game?.code && bidValue !== undefined) {
+    if (activeGame.code && bidValue !== undefined) {
       socket.emit('bid:live', {
-        gameCode: game.code,
+        gameCode: activeGame.code,
         cardRound,
         playerId,
         bidValue
@@ -476,15 +271,16 @@ export function GameRoomPage() {
   const closeBidsModal = () => {
     setModalRound(null);
     setModalBids({});
+    setEditRound(null);
   };
 
   const handleModalInputChange = (playerId: string, value?: number) => {
     setModalBids((prev) => ({ ...prev, [playerId]: value }));
 
     // Keep realtime showcase in sync when bids are entered from the popup modal.
-    if (game?.code && modalRound !== null && value !== undefined) {
+    if (activeGame.code && modalRound !== null && value !== undefined) {
       socket.emit('bid:live', {
-        gameCode: game.code,
+        gameCode: activeGame.code,
         cardRound: modalRound,
         playerId,
         bidValue: value
@@ -525,27 +321,30 @@ export function GameRoomPage() {
       try {
         setSavingEdits(true);
         setError('');
-        const roundBids = bids[modalRound] ?? {};
+        const roundBids = modalBids;
         const originalRoundBids = activeGame.bids?.[modalRound] ?? {};
-        const changedEntries = Object.entries(roundBids).filter(([playerId, currentBid]) => {
+        const changedEntries = Object.keys(roundBids).filter((playerId) => {
           const originalBid = originalRoundBids[playerId];
-          return currentBid?.bid !== undefined && !Number.isNaN(currentBid.bid) && originalBid?.completed !== currentBid.completed;
+          const currentBid = roundBids[playerId];
+          const currentCompleted = bids[modalRound]?.[playerId]?.completed ?? false;
+          return currentBid !== undefined && !Number.isNaN(currentBid) &&
+            (originalBid?.completed !== currentCompleted || originalBid?.bid !== currentBid);
         });
 
         await withLoading('Editing points...', async () => {
-          for (const [playerId, currentBid] of changedEntries) {
+          for (const playerId of changedEntries) {
+            const currentBid = roundBids[playerId];
             const response = await submitBid(activeGame.code, {
               round: modalRound,
               playerId,
-              bid: currentBid!.bid as number,
-              completed: currentBid!.completed
+              bid: currentBid as number,
+              completed: bids[modalRound]?.[playerId]?.completed ?? false
             });
 
             setGame(response.game);
             populateBidsFromGame(response.game);
           }
 
-          await resetEditPoll(activeGame.code);
         });
         setShowSaveToast(true);
         if (saveToastTimeoutRef.current) {
@@ -717,17 +516,6 @@ export function GameRoomPage() {
     }
   };
 
-  const checkAllBidsSubmitted = () => {
-    if (!activeGame) return false;
-    return activeGame.players.every((player) => {
-      const hasSubmittedBid = Object.values(activeGame.bids).some((roundBids) => {
-        const bidEntry = roundBids[player.id];
-        return bidEntry && (bidEntry.status === 'success' || bidEntry.status === 'fail');
-      });
-      return hasSubmittedBid;
-    });
-  };
-
   const checkRoundBidsSubmitted = (round: number) => {
     if (!activeGame) return false;
     const roundBids = activeGame.bids[round];
@@ -747,91 +535,17 @@ export function GameRoomPage() {
     return timeSinceSubmission <= 2 * 60 * 1000;
   };
 
-  const getPollVoteStats = () => {
-    if (!game?.editPoll) return { yes: 0, no: 0, total: game?.players.length ?? 0 };
-    const votes = game.editPoll.votes ?? {};
-    const yesCount = Object.values(votes).filter((v) => v === true).length;
-    const noCount = Object.values(votes).filter((v) => v === false).length;
-    return { yes: yesCount, no: noCount, total: game.players.length };
-  };
-
-  const hasThresholdMet = () => {
-    const stats = getPollVoteStats();
-    if (stats.total === 0) return false;
-    return stats.yes >= Math.ceil(stats.total * 0.5);
-  };
-
-  const handleOpenEditPoll = (round: number) => {
+  const handleOpenEdit = (round: number) => {
     setEditRound(round);
-    setEditMessage('');
-    setEditMessageError('');
-    setShowEditPollModal(true);
-
-    if (game?.code) {
-      socket.emit('edit:signal', { gameCode: game.code, round, at: Date.now() });
-    }
-  };
-
-  const closeEditPollModal = () => {
-    setShowEditPollModal(false);
-    setEditMessage('');
-    setEditMessageError('');
-  };
-
-  const handleSubmitEditPoll = async () => {
-    if (!editMessage.trim()) {
-      setEditMessageError('Please enter a message for the edit request');
-      return;
-    }
-
-    if (!activeGame.code || !isSuperPlayer || editRound === null) return;
-
-    setError('');
-    try {
-      const response = await withLoading('Initiating poll...', () =>
-        initiateEditPoll(activeGame.code, {
-          playerId: activeGame.players.find((p) => p.isSuperPlayer)?.id ?? '',
-          message: editMessage,
-          round: editRound
-        })
-      );
-      setGame(response.game);
-      closeEditPollModal();
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to initiate edit poll';
-      setError(errorMsg);
-    }
-  };
-
-
-  const handleVoteOnPoll = async (vote: boolean) => {
-    if (!activeGame.code) return;
-
-    if (!editVoterId) return;
-
-    try {
-      const response = await voteOnEditPoll(activeGame.code, {
-        playerId: editVoterId,
-        vote
-      });
-      setGame(response.game);
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to vote';
-      setError(errorMsg);
-    }
-  };
-
-  const handleManualClosePoll = async () => {
-    if (!activeGame.code || !isSuperPlayer) return;
-
-    setError('');
-    try {
-      const response = await closeEditPoll(activeGame.code);
-      setGame(response.game);
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to close poll';
-      setError(errorMsg);
-    }
+    playSiren();
+    // Populate bids from current game state for this round
+    const serverRoundBids = activeGame.bids?.[round] ?? {};
+    setModalBids(
+      Object.fromEntries(
+        activeGame.players.map((player) => [player.id, serverRoundBids[player.id]?.bid])
+      )
+    );
+    openBidsModal(round);
   };
 
   const handleBackToCreate = () => {
@@ -1073,9 +787,23 @@ export function GameRoomPage() {
                     {canEditSubmittedBids ? (
                       <div className="bids-modal-edit-controls">
                         <span className="bids-modal-bid-chip">
-                          <span>{submittedBid?.bid ?? ''}</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={maxTwoDigitBid}
+                            value={modalBids[p.id] ?? ''}
+                            onChange={(e) => {
+                              const numeric = e.target.value.replace(/\D/g, '');
+                              handleModalInputChange(
+                                p.id,
+                                numeric === '' ? undefined : Math.min(Number(numeric), maxTwoDigitBid)
+                              );
+                            }}
+                            aria-label={`Bid for ${p.name}`}
+                          />
                           <span
                             className={`edit-status-indicator ${submittedBid?.completed ? 'is-complete' : 'is-incomplete'}`}
+                            aria-label={submittedBid?.completed ? 'Completed' : 'Incomplete'}
                           >
                             {submittedBid?.completed ? '✓' : '✗'}
                           </span>
@@ -1153,156 +881,7 @@ export function GameRoomPage() {
         </div>
       ) : null}
 
-      {showEditPollModal && !game?.editPoll?.active ? (
-        <div className="edit-poll-modal-overlay" role="dialog" aria-modal="true">
-          <div className="edit-poll-modal-backdrop" />
-          <div className="edit-poll-modal-card">
-            <button
-              type="button"
-              className="edit-poll-modal-close"
-              onClick={closeEditPollModal}
-              aria-label="Close edit poll modal"
-            >
-              Close
-            </button>
-            <p className="eyebrow">Request Edit Permission</p>
-            <h2>
-              Edit Round {editRound}
-              {editRound && activeGame.distribution.find((d) => d.round === editRound) && (
-                <span style={{ display: 'block', fontSize: '0.75rem', fontWeight: 400, marginTop: '4px' }}>
-                  {activeGame.distribution.find((d) => d.round === editRound)?.label}
-                </span>
-              )}
-            </h2>
-            <p className="muted">
-              Describe what you want to edit. A poll will be sent to all players. You need at least 50% approval to edit.
-            </p>
 
-            <div className="edit-poll-form">
-              <label className="muted">Edit Message</label>
-              <textarea
-                value={editMessage}
-                onChange={(e) => {
-                  setEditMessage(e.target.value);
-                  setEditMessageError('');
-                }}
-                placeholder="e.g., 'Need to correct player 1 bid for this round'"
-                maxLength={500}
-                rows={4}
-              />
-              {editMessageError && <p style={{ color: '#dc2626', fontSize: '0.875rem' }}>{editMessageError}</p>}
-              <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>
-                {editMessage.length} / 500 characters
-              </p>
-            </div>
-
-            <div className="edit-poll-actions">
-              <button
-                type="button"
-                onClick={handleSubmitEditPoll}
-                className="start-game-btn"
-              >
-                Send Poll to Players
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {game?.editPoll?.active ? (
-        <div className="edit-poll-voting-modal-overlay" role="dialog" aria-modal="true">
-          <div className="edit-poll-voting-modal-backdrop" />
-          <div className="edit-poll-voting-modal-card">
-            {isSuperPlayer && (
-              <button
-                type="button"
-                className="edit-poll-modal-close"
-                onClick={handleManualClosePoll}
-                aria-label="Close edit poll"
-                title="Close poll (super player only)"
-              >
-                ✕
-              </button>
-            )}
-            <p className="eyebrow">Edit Poll - Round {editPoll?.round}</p>
-            <h2>
-              Edit Round {editPoll?.round}
-              {editPoll?.round && activeGame.distribution.find((d) => d.round === editPoll.round) && (
-                <span style={{ display: 'block', fontSize: '0.75rem', fontWeight: 400, marginTop: '4px' }}>
-                  {activeGame.distribution.find((d) => d.round === editPoll.round)?.label}
-                </span>
-              )}
-            </h2>
-            <p className="muted">
-              {editPoll?.message}
-            </p>
-
-            {(() => {
-              const stats = getPollVoteStats();
-              return (
-                <div className="poll-stats">
-                  <div className="poll-stat-row">
-                    <span>Total Players:</span>
-                    <strong>{stats.total}</strong>
-                  </div>
-                  <div className="poll-stat-row">
-                    <span>Yes Votes:</span>
-                    <strong style={{ color: '#16a34a' }}>{stats.yes}</strong>
-                  </div>
-                  <div className="poll-stat-row">
-                    <span>No Votes:</span>
-                    <strong style={{ color: '#b91c1c' }}>{stats.no}</strong>
-                  </div>
-                  <div className="poll-stat-row">
-                    <span>Still Voting:</span>
-                    <strong>{stats.total - stats.yes - stats.no}</strong>
-                  </div>
-                  {pollTimeRemaining !== null && (
-                    <div className="poll-stat-row">
-                      <span>Time Remaining:</span>
-                      <strong>{pollTimeRemaining}s</strong>
-                    </div>
-                  )}
-                  {stats.yes + stats.no > 0 && (
-                    <div className="poll-requirement">
-                      {hasThresholdMet() ? (
-                        <p style={{ color: '#16a34a' }}>✓ Threshold met! Edit will be allowed.</p>
-                      ) : (
-                        <p style={{ color: '#b91c1c' }}>Need {Math.ceil(stats.total * 0.5)} votes (50%) to proceed.</p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-
-            {!editPoll || !Object.prototype.hasOwnProperty.call(editPoll.votes, editVoterId) ? (
-              <div className="poll-voting-actions">
-                <button
-                  type="button"
-                  onClick={() => handleVoteOnPoll(true)}
-                  className="vote-yes-btn"
-                  style={{ backgroundColor: '#16a34a' }}
-                >
-                  ✓ Yes
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleVoteOnPoll(false)}
-                  className="vote-no-btn"
-                  style={{ backgroundColor: '#b91c1c' }}
-                >
-                  ✗ No
-                </button>
-              </div>
-            ) : (
-              <div className="poll-voted-message">
-                <p>✓ You have voted and cannot change it</p>
-              </div>
-            )}
-          </div>
-        </div>
-      ) : null}
 
       <header className="room-header panel">
         <div>
@@ -1409,7 +988,7 @@ export function GameRoomPage() {
             <tbody>
               {activeGame.distribution.map((row) => {
                 const roundBidsComplete = checkRoundBidsSubmitted(row.round);
-                const showEditButton = isSuperPlayer && roundBidsComplete && isWithin2MinuteWindow(row.round) && !game?.editPoll?.active;
+                const showEditButton = isSuperPlayer && roundBidsComplete && isWithin2MinuteWindow(row.round);
                 
                 return (
                   <tr key={row.round}>
@@ -1435,7 +1014,7 @@ export function GameRoomPage() {
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleOpenEditPoll(row.round);
+                              handleOpenEdit(row.round);
                             }}
                             className="row-edit-btn"
                             title="Edit this round's bids"
